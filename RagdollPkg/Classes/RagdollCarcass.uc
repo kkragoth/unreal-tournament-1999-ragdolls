@@ -13,17 +13,35 @@ class RagdollCarcass extends Carcass
 
 var float SimFreq;
 var int   SimSubSteps;
+var float DeathImpulseScale;
 
 native function BuildRagdoll();
 native function StepRagdoll(float DeltaSeconds);
 native function SyncRagdoll();
 native function ShutdownRagdoll();
+native function ApplyDamageImpulse(vector HitLocation, vector Momentum, int Damage);
+native function WalkOverPush(Pawn Pusher);
+
+// Projectiles and hitscan call TakeDamage on the corpse. We translate the
+// hit into a Box3D impulse on the bodies near the impact point. The base
+// Carcass/Pawn damage handling is deliberately skipped: our actor has no
+// movement physics of its own (PHYS_None), and letting the base physics code
+// run would fight the Box3D sync. Gibbing can be layered on later.
+function TakeDamage(int Damage, Pawn instigatedBy, Vector hitlocation, Vector momentum, name damageType)
+{
+	if ( bDecorative )
+		return;
+	ApplyDamageImpulse(hitlocation, momentum, Damage);
+}
 
 function PostBeginPlay()
 {
 	Super.PostBeginPlay();
 	SetPhysics(PHYS_None);
-	SetCollision(false, false, false);
+	// NOTE: do NOT disable collision here. The defaultproperties already set
+	// bCollideActors=True / bBlockActors=False / bProjTarget=True so projectiles
+	// and hitscan can hit the corpse; SetCollision(false,false,false) previously
+	// made the corpse completely unhittable (shooting did nothing).
 	SetTimer(1.0 / SimFreq, true);
 }
 
@@ -54,6 +72,23 @@ function Timer()
 {
 	StepRagdoll(1.0 / SimFreq);
 	SyncRagdoll();
+	CheckWalkPush();
+}
+
+// A living pawn walking/running over the corpse shoves it out of the way.
+// WalkOverPush is a native velocity-matching push (bodies under the pawn are
+// eased toward the pawn's horizontal motion, capped) so it slides the corpse
+// aside at the pawn's pace instead of launching it: impulses applied every
+// tick would stack and rocket the ragdoll into the sky.
+function CheckWalkPush()
+{
+	local Pawn P;
+
+	foreach AllActors(class'Pawn', P)
+	{
+		if ( P.Health > 0 && VSize(P.Velocity) > 80 && VSize(P.Location - Location) < 240 )
+			WalkOverPush(P);
+	}
 }
 
 simulated function Destroyed()
@@ -68,6 +103,7 @@ state Dead
 	{
 		StepRagdoll(1.0 / SimFreq);
 		SyncRagdoll();
+		CheckWalkPush();
 	}
 	function BeginState()
 	{
@@ -79,6 +115,7 @@ defaultproperties
 {
 	SimFreq=50.0
 	SimSubSteps=4
+	DeathImpulseScale=1.0
 	bAlwaysTick=true
 	RemoteRole=ROLE_SimulatedProxy
 	DrawType=DT_Mesh
@@ -86,9 +123,10 @@ defaultproperties
 	Texture=Texture'Engine.S_Corpse'
 	CollisionRadius=18.000000
 	CollisionHeight=4.000000
-	bCollideActors=False
+	bCollideActors=True
+	bBlockActors=False
 	bCollideWorld=False
-	bProjTarget=False
+	bProjTarget=True
 	Mass=180.000000
 	Buoyancy=105.000000
 }

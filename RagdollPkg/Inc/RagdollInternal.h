@@ -27,21 +27,24 @@ struct FRagdollBoneDef
 	float MassKg;        // approximate mass in kilograms
 };
 
-#define RAGDOLL_BONE_COUNT 11
+#define RAGDOLL_BONE_COUNT 14
 
 enum ERagdollBone
 {
 	BONE_Pelvis     = 0,
 	BONE_Spine      = 1,
-	BONE_Head       = 2,
-	BONE_UpperArmL  = 3,
-	BONE_UpperArmR  = 4,
-	BONE_ForearmL   = 5,
-	BONE_ForearmR   = 6,
-	BONE_ThighL     = 7,
-	BONE_ThighR     = 8,
-	BONE_ShinL      = 9,
-	BONE_ShinR      = 10
+	BONE_Neck       = 2,
+	BONE_Head       = 3,
+	BONE_UpperArmL  = 4,
+	BONE_UpperArmR  = 5,
+	BONE_ForearmL   = 6,
+	BONE_ForearmR   = 7,
+	BONE_ThighL     = 8,
+	BONE_ThighR     = 9,
+	BONE_ShinL      = 10,
+	BONE_ShinR      = 11,
+	BONE_FootL      = 12,
+	BONE_FootR      = 13
 };
 
 // Runtime state for one ragdolling carcass. Stored in a process-global map

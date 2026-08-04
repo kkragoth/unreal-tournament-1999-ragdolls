@@ -45,7 +45,8 @@ const FRagdollBoneDef GRagdollBoneDefs[RAGDOLL_BONE_COUNT] =
 {
 	{ 7.0f,  7.0f,  5.0f,    0.0f,   0.0f,   0.0f, 8.0f },   // BONE_Pelvis
 	{ 8.0f,  6.0f, 10.0f,    0.0f,   0.0f,  16.0f, 10.0f },  // BONE_Spine
-	{ 4.5f,  4.5f,  4.5f,    0.0f,   0.0f,  33.0f, 4.0f },   // BONE_Head
+	{ 3.0f,  3.0f,  4.5f,    0.0f,   0.0f,  25.0f, 2.0f },   // BONE_Neck
+	{ 4.5f,  4.5f,  5.0f,    0.0f,   0.0f,  33.0f, 4.0f },   // BONE_Head
 	{ 2.0f,  2.0f,  7.0f,  -13.0f,   6.0f,  24.0f, 3.0f },   // BONE_UpperArmL
 	{ 2.0f,  2.0f,  7.0f,   13.0f,   6.0f,  24.0f, 3.0f },   // BONE_UpperArmR
 	{ 1.5f,  1.5f,  6.0f,  -13.0f,   8.0f,   6.0f, 2.0f },   // BONE_ForearmL
@@ -53,7 +54,9 @@ const FRagdollBoneDef GRagdollBoneDefs[RAGDOLL_BONE_COUNT] =
 	{ 3.0f,  3.0f,  8.0f,   -7.0f,   0.0f, -12.0f, 6.0f },   // BONE_ThighL
 	{ 3.0f,  3.0f,  8.0f,    7.0f,   0.0f, -12.0f, 6.0f },   // BONE_ThighR
 	{ 2.5f,  2.5f,  8.0f,   -7.0f,   0.0f, -30.0f, 3.0f },   // BONE_ShinL
-	{ 2.5f,  2.5f,  8.0f,    7.0f,   0.0f, -30.0f, 3.0f }    // BONE_ShinR
+	{ 2.5f,  2.5f,  8.0f,    7.0f,   0.0f, -30.0f, 3.0f },   // BONE_ShinR
+	{ 2.0f,  4.0f,  2.5f,   -6.5f,   2.0f, -37.0f, 1.0f },   // BONE_FootL
+	{ 2.0f,  4.0f,  2.5f,    6.5f,   2.0f, -37.0f, 1.0f }    // BONE_FootR
 };
 
 TMap<AActor*, FRagdollState>& GetRagdollStates()
@@ -130,21 +133,53 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	S.World = b3CreateWorld( &Wd );
 
 	// Ground: a large static slab whose top sits just under the corpse's feet.
-	// NOTE: the slab must be placed at the corpse's XY, not at the box3d world
-	// origin (0,0), or the body falls forever under gravity without landing.
-	FLOAT FeetZ = Origin.Z - 38.0f * DrawScale;
+	// Trace straight down to the real floor so the body rests flush with it
+	// instead of floating above (or sinking into) the ground when the corpse
+	// spawns away from the "default" stand height.
+	FLOAT FeetZ = Origin.Z - 40.0f * DrawScale;
+	{
+		FVector TraceStart = Origin;
+		FVector TraceEnd   = Origin - FVector( 0, 0, 4000.0f );
+		FCheckResult Hit;
+		if( C->GetLevel() && !C->GetLevel()->SingleLineCheck( Hit, C, TraceEnd, TraceStart, TRACE_Level ) )
+			FeetZ = Hit.Location.Z;
+	}
 	{
 		b3BodyDef Bd = b3DefaultBodyDef();
 		Bd.type     = b3_staticBody;
-		Bd.position = { Origin.X*RAGDOLL_U2M, Origin.Y*RAGDOLL_U2M, ( FeetZ - 0.5f ) * RAGDOLL_U2M };
+		// The slab's top is parked 0.06m (3 UU) below the real floor: Box3D keeps
+		// resting bodies a small skin-width above the surface, which made the
+		// corpse hover slightly. Sinking the slab cancels that gap.
+		Bd.position = { Origin.X*RAGDOLL_U2M, Origin.Y*RAGDOLL_U2M, ( FeetZ - 0.5f - 0.06f ) * RAGDOLL_U2M };
 		S.Ground = b3CreateBody( S.World, &Bd );
 
 		b3ShapeDef Sd = b3DefaultShapeDef();
-		Sd.baseMaterial.friction     = 0.9f;
+		Sd.baseMaterial.friction     = 0.5f;
 		Sd.baseMaterial.restitution  = 0.0f;
-		b3BoxHull Hull = b3MakeBoxHull( 25.0f, 25.0f, 0.5f );
+		b3BoxHull Hull = b3MakeBoxHull( 400.0f, 400.0f, 0.5f );
 		b3CreateHullShape( S.Ground, &Sd, &Hull.base );
 	}
+
+	// Death impulse: the corpse inherits the dying pawn's velocity (copied into
+	// C->Velocity by Initfor, in UU/s) as a base, then each body gets a random
+	// jitter plus angular velocity so the chain flexes and no two bodies settle
+	// in the same pose. A stationary victim still receives a minimum randomized
+	// kick so it flops instead of dropping straight down.
+	FLOAT ImpulseScale = C->DeathImpulseScale > 0.0f ? C->DeathImpulseScale : 1.0f;
+	FVector DeathVel = C->Velocity * RAGDOLL_U2M * ImpulseScale;   // m/s
+	FLOAT BaseSpeed  = DeathVel.Size();
+	if( BaseSpeed < 0.5f )
+	{
+		DeathVel.X += ( appFrand() * 2.0f - 1.0f ) * 3.0f;
+		DeathVel.Y += ( appFrand() * 2.0f - 1.0f ) * 3.0f;
+		DeathVel.Z += 1.0f;
+		BaseSpeed = DeathVel.Size();
+	}
+	// Clamp so a fast fall or hit doesn't blast the body out of the world or
+	// off the ground slab.
+	const FLOAT MaxImpulse = 6.0f;
+	if( BaseSpeed > MaxImpulse )
+		DeathVel *= MaxImpulse / BaseSpeed;
 
 	// Ragdoll bodies.
 	for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
@@ -161,13 +196,26 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 		Bd.gravityScale   = 1.0f;
 		S.Bodies[i] = b3CreateBody( S.World, &Bd );
 
+		// Per-body randomized impulse + tumble so the corpse acts floppy and
+		// lands differently every time.
+		b3Vec3 V;
+		V.x = DeathVel.X + ( appFrand() * 2.0f - 1.0f ) * 1.2f;
+		V.y = DeathVel.Y + ( appFrand() * 2.0f - 1.0f ) * 1.2f;
+		V.z = DeathVel.Z + ( appFrand() * 2.0f - 1.0f ) * 0.8f;
+		b3Body_SetLinearVelocity( S.Bodies[i], V );
+		b3Vec3 W;
+		W.x = ( appFrand() * 2.0f - 1.0f ) * 5.0f;
+		W.y = ( appFrand() * 2.0f - 1.0f ) * 5.0f;
+		W.z = ( appFrand() * 2.0f - 1.0f ) * 3.0f;
+		b3Body_SetAngularVelocity( S.Bodies[i], W );
+
 		FLOAT HX = D.HX * DrawScale * RAGDOLL_U2M;
 		FLOAT HY = D.HY * DrawScale * RAGDOLL_U2M;
 		FLOAT HZ = D.HZ * DrawScale * RAGDOLL_U2M;
 
 		b3ShapeDef Sd = b3DefaultShapeDef();
 		Sd.density = D.MassKg / ( 8.0f * HX * HY * HZ );
-		Sd.baseMaterial.friction     = 0.8f;
+		Sd.baseMaterial.friction     = 0.6f;
 		Sd.baseMaterial.restitution  = 0.05f;
 		b3BoxHull Hull = b3MakeBoxHull( HX, HY, HZ );
 		b3CreateHullShape( S.Bodies[i], &Sd, &Hull.base );
@@ -178,7 +226,8 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 
 	// Joints.
 	AddJoint( S, BONE_Pelvis,    BONE_Spine,     FVector(  0.0f, 0.0f,  6.0f), DrawScale, false );
-	AddJoint( S, BONE_Spine,     BONE_Head,      FVector(  0.0f, 0.0f, 26.0f), DrawScale, false );
+	AddJoint( S, BONE_Spine,     BONE_Neck,      FVector(  0.0f, 0.0f, 22.0f), DrawScale, false );
+	AddJoint( S, BONE_Neck,      BONE_Head,      FVector(  0.0f, 0.0f, 30.0f), DrawScale, false );
 	AddJoint( S, BONE_Spine,     BONE_UpperArmL, FVector(-13.0f, 6.0f, 24.0f), DrawScale, false );
 	AddJoint( S, BONE_Spine,     BONE_UpperArmR, FVector( 13.0f, 6.0f, 24.0f), DrawScale, false );
 	AddJoint( S, BONE_UpperArmL, BONE_ForearmL,  FVector(-13.0f, 8.0f, 12.0f), DrawScale, true );
@@ -187,6 +236,8 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	AddJoint( S, BONE_Pelvis,    BONE_ThighR,    FVector(  7.0f, 0.0f, -6.0f), DrawScale, false );
 	AddJoint( S, BONE_ThighL,    BONE_ShinL,     FVector( -7.0f, 0.0f,-22.0f), DrawScale, true );
 	AddJoint( S, BONE_ThighR,    BONE_ShinR,     FVector(  7.0f, 0.0f,-22.0f), DrawScale, true );
+	AddJoint( S, BONE_ShinL,     BONE_FootL,     FVector( -7.0f, 2.0f,-34.0f), DrawScale, false );
+	AddJoint( S, BONE_ShinR,     BONE_FootR,     FVector(  7.0f, 2.0f,-34.0f), DrawScale, false );
 
 	// Procedural mannequin mesh.
 	S.Mesh = CreateRagdollMesh( C );
@@ -208,12 +259,6 @@ static void StepRagdollImpl( ARagdollCarcass* C, FLOAT DeltaSeconds )
 	FLOAT TimeStep = 1.0f / Max( C->SimFreq, 1.0f );
 	INT   SubSteps = Max( C->SimSubSteps, 1 );
 	b3World_Step( S->World, TimeStep, SubSteps );
-	static INT LogCount = 0;
-	if( LogCount < 200 )
-	{
-		LogCount++;
-		debugf( TEXT("RagdollPkg: StepRagdoll actor=%s dt=%.4f steps=%i"), C->GetName(), DeltaSeconds, SubSteps );
-	}
 }
 
 static void SyncRagdollImpl( ARagdollCarcass* C )
@@ -240,11 +285,32 @@ static void SyncRagdollImpl( ARagdollCarcass* C )
 
 	C->Location = NewLoc;
 	C->Rotation = NewRot;
-	static INT LogCount = 0;
-	if( LogCount < 100 )
+
+	// Keep the collision hitbox covering the whole body. The default Carcass
+	// cylinder (radius 18, height 4) is a dot at the pelvis, so shots that
+	// visually hit the sprawled body miss entirely. Track the bone extents and
+	// grow/shrink the cylinder so the corpse is actually hittable.
 	{
-		LogCount++;
-		debugf( TEXT("RagdollPkg: SyncRagdoll actor=%s loc=(%.0f,%.0f,%.0f)"), C->GetName(), C->Location.X, C->Location.Y, C->Location.Z );
+		FLOAT DrawScale = ( C->DrawScale > 0.0f ) ? C->DrawScale : 1.0f;
+		FLOAT MaxR = 20.0f, MaxUp = 20.0f, MaxDown = 20.0f;
+		for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+		{
+			b3WorldTransform BT = b3Body_GetTransform( S->Bodies[i] );
+			const FRagdollBoneDef& D = GRagdollBoneDefs[i];
+			FLOAT E  = Max( Max( D.HX, D.HY ), D.HZ ) * DrawScale;
+			FLOAT dx = BT.p.x * RAGDOLL_M2U - NewLoc.X;
+			FLOAT dy = BT.p.y * RAGDOLL_M2U - NewLoc.Y;
+			FLOAT dz = BT.p.z * RAGDOLL_M2U - NewLoc.Z;
+			MaxR = Max( MaxR, (FLOAT)sqrt( dx*dx + dy*dy ) + E );
+			if( dz > 0.0f )
+				MaxUp   = Max( MaxUp,   dz + E );
+			else
+				MaxDown = Max( MaxDown, -dz + E );
+		}
+		FLOAT NewRadius = MaxR;
+		FLOAT NewHeight = Max( MaxUp, MaxDown );
+		if( Abs( NewRadius - C->CollisionRadius ) > 8.0f || Abs( NewHeight - C->CollisionHeight ) > 8.0f )
+			C->SetCollisionSize( NewRadius, NewHeight );
 	}
 }
 
@@ -290,6 +356,128 @@ void ARagdollCarcass::execShutdownRagdoll( FFrame& Stack, RESULT_DECL )
 {
 	P_FINISH;
 	ShutdownRagdollImpl( this );
+}
+
+void ARagdollCarcass::execApplyDamageImpulse( FFrame& Stack, RESULT_DECL )
+{
+	guard(ARagdollCarcass::execApplyDamageImpulse);
+	P_GET_VECTOR( HitLocation );
+	P_GET_VECTOR( Momentum );
+	P_GET_INT( Damage );
+	P_FINISH;
+
+	FRagdollState* S = GetRagdollStates().Find( this );
+	if( !S || !S->bBuilt )
+		return;
+
+	b3Vec3 Hit;
+	Hit.x = HitLocation.X * RAGDOLL_U2M;
+	Hit.y = HitLocation.Y * RAGDOLL_U2M;
+	Hit.z = HitLocation.Z * RAGDOLL_U2M;
+
+	// Shot direction: prefer the hit momentum; fall back to a random upward kick.
+	b3Vec3 Dir;
+	FLOAT MLen = sqrt( Momentum.X*Momentum.X + Momentum.Y*Momentum.Y + Momentum.Z*Momentum.Z );
+	if( MLen > 1.0f )
+	{
+		Dir.x = Momentum.X / MLen;
+		Dir.y = Momentum.Y / MLen;
+		Dir.z = Momentum.Z / MLen;
+	}
+	else
+	{
+		FLOAT A = appFrand() * 2.0f * PI;
+		Dir.x = appCos( A );
+		Dir.y = appSin( A );
+		Dir.z = 0.6f;
+	}
+
+	// Whole-body push: every body gets shoved in the shot direction so the
+	// entire corpse reacts, not just the limb that happened to be hit. Bodies
+	// close to the impact take the brunt (and get a lever-arm spin since the
+	// impulse is applied at the hit point); distant bodies still get pushed
+	// toward the shot direction so the whole ragdoll is knocked.
+	const FLOAT CloseRadius = 0.40f; // full-strength zone (m, ~20 UU)
+	const FLOAT MaxRadius   = 1.50f; // beyond this only the min nudge remains
+	FLOAT BaseSpeed = 3.5f + Min( Damage, 120 ) * 0.06f;
+	if( BaseSpeed > 11.0f )
+		BaseSpeed = 11.0f;
+
+	for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+	{
+		b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
+		FLOAT dx = T.p.x - Hit.x, dy = T.p.y - Hit.y, dz = T.p.z - Hit.z;
+		FLOAT Dist  = sqrt( dx*dx + dy*dy + dz*dz );
+		FLOAT Scale = 1.0f - ( Dist - CloseRadius ) / Max( MaxRadius - CloseRadius, 0.001f );
+		if( Scale < 0.2f )
+			Scale = 0.2f; // minimum nudge keeps every body awake and reacting
+		FLOAT Speed = BaseSpeed * Scale;
+		FLOAT Mass  = b3Body_GetMass( S->Bodies[i] );
+		b3Vec3 Imp;
+		Imp.x = Dir.x * Speed * Mass;
+		Imp.y = Dir.y * Speed * Mass;
+		Imp.z = ( Dir.z * Speed + 2.0f ) * Mass;
+		if( Dist <= CloseRadius )
+			b3Body_ApplyLinearImpulse( S->Bodies[i], Imp, Hit, true );      // at hit point -> torque
+		else
+			b3Body_ApplyLinearImpulseToCenter( S->Bodies[i], Imp, true );   // pure push
+	}
+	unguard;
+}
+
+// Walk-over push: a living pawn moving over the corpse drags the bodies under
+// its feet along with it. Uses velocity matching (eased toward the pawn's
+// horizontal motion, capped) instead of impulses, so the corpse slides aside
+// at the pawn's pace and stops when the pawn stops. Impulses here would stack
+// up over the 50 Hz ticks and launch the ragdoll.
+void ARagdollCarcass::execWalkOverPush( FFrame& Stack, RESULT_DECL )
+{
+	guard(ARagdollCarcass::execWalkOverPush);
+	P_GET_ACTOR( Pusher );
+	P_FINISH;
+
+	FRagdollState* S = GetRagdollStates().Find( this );
+	if( !S || !S->bBuilt || !Pusher )
+		return;
+	APawn* P = Cast<APawn>( Pusher );
+	if( !P )
+		return;
+
+	// Pawn's horizontal velocity in m/s; stationary/too slow pawns do nothing.
+	b3Vec3 Push;
+	Push.x = P->Velocity.X * RAGDOLL_U2M;
+	Push.y = P->Velocity.Y * RAGDOLL_U2M;
+	Push.z = 0.0f;
+	FLOAT Speed = sqrt( Push.x*Push.x + Push.y*Push.y );
+	if( Speed < 0.8f )
+		return;
+	const FLOAT MaxPushSpeed = 4.5f;
+	if( Speed > MaxPushSpeed )
+	{
+		FLOAT Scl = MaxPushSpeed / Speed;
+		Push.x *= Scl;
+		Push.y *= Scl;
+	}
+
+	// Pawn feet position in meters; only bodies roughly under the feet react.
+	FLOAT Px = P->Location.X * RAGDOLL_U2M;
+	FLOAT Py = P->Location.Y * RAGDOLL_U2M;
+	FLOAT FootZ = ( P->Location.Z - P->CollisionHeight ) * RAGDOLL_U2M;
+
+	for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+	{
+		b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
+		FLOAT dx = T.p.x - Px, dy = T.p.y - Py, dz = T.p.z - FootZ;
+		if( dx*dx + dy*dy > 0.85f*0.85f )
+			continue;
+		if( dz > 0.7f || dz < -1.3f )
+			continue;
+		b3Vec3 V = b3Body_GetLinearVelocity( S->Bodies[i] );
+		V.x += ( Push.x - V.x ) * 0.35f;   // ease toward the pawn's motion
+		V.y += ( Push.y - V.y ) * 0.35f;
+		b3Body_SetLinearVelocity( S->Bodies[i], V );
+	}
+	unguard;
 }
 
 // Register ARagdollCarcass.
