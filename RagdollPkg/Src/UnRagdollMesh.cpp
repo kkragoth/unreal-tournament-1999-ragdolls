@@ -183,18 +183,6 @@ void URagdollMesh::GetFrame( FVector* Verts, INT Size, FCoords Coords, AActor* O
 		FVector View = Pos.TransformPointBy( ActorToLocal ).TransformPointBy( ModelCoords );
 		*(FVector*)( (BYTE*)Verts + (ptrdiff_t)i * Size ) = View;
 	}
-
-	// DIAG (temporary): verify the emitted (view) verts are box-sized.
-	static INT GetFrameDiag = 0;
-	if( GetFrameDiag++ < 3 && S && S->bBuilt && Num > 0 )
-	{
-		b3WorldTransform T0 = b3Body_GetTransform( S->Bodies[0] );
-		debugf( TEXT("RagdollMesh: diag bone0_world=(%.1f,%.1f,%.1f) verts0_view=(%.1f,%.1f,%.1f) coordsOrigin=(%.1f,%.1f,%.1f) ownerLoc=(%.1f,%.1f,%.1f)"),
-			T0.p.x*RAGDOLL_M2U, T0.p.y*RAGDOLL_M2U, T0.p.z*RAGDOLL_M2U,
-			Verts[0].X, Verts[0].Y, Verts[0].Z,
-			Coords.Origin.X, Coords.Origin.Y, Coords.Origin.Z,
-			Owner ? Owner->Location.X : 0.0f, Owner ? Owner->Location.Y : 0.0f, Owner ? Owner->Location.Z : 0.0f );
-	}
 	unguard;
 }
 
