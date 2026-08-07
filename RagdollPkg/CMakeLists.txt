@@ -12,6 +12,7 @@ set(RAGDOLLPKG_FILES_INC
     ${RAGDOLLPKG_INC_PATH}/RagdollPkgClasses.h)
 set(RAGDOLLPKG_FILES_SRC
     ${RAGDOLLPKG_SRC_PATH}/RagdollCarcass.cpp
+    ${RAGDOLLPKG_SRC_PATH}/UnRagdollGeometry.cpp
     ${RAGDOLLPKG_SRC_PATH}/UnRagdollMesh.h
     ${RAGDOLLPKG_SRC_PATH}/UnRagdollMesh.cpp)
 set(UNREALSCRIPT_CLASSES
