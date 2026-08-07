@@ -69,9 +69,32 @@ TMap<AActor*, FRagdollState>& GetRagdollStates()
 	Box3D world construction.
 -----------------------------------------------------------------------------*/
 
+// Joint kind and per-joint limits. Anatomical ranges of motion:
+//  - JK_Hinge: one-axis revolute joint. L0/L1 are the lower/upper angle in
+//    radians (positive = right-hand rotation about the frame Z axis, which the
+//    hinge frame orients along world +Y). Knees/elbows get a one-sided range so
+//    they can only flex the natural way (knee bends back, elbow bends forward)
+//    instead of the old symmetric +/-51 degrees that let both hyperextend.
+//  - JK_Ball: spherical joint with a cone limit about frameA Z and a twist
+//    limit about frameB Z. L0 = cone half-angle, L1/L2 = twist range. With
+//    identity frames these are the world +Z (vertical) cone and the limb's own
+//    long-axis twist, which stops limbs from flailing a full 360 degrees.
+enum EJointKind
+{
+	JK_Ball,
+	JK_Hinge
+};
+
+struct FRagdollJointSpec
+{
+	EJointKind Kind;
+	FLOAT L0, L1, L2;
+	FLOAT Friction; // motor friction torque multiplier (x5 Nm)
+};
+
 // Anchor offsets are canonical (relative to the pelvis) and are scaled by
 // DrawScale here to match the scaled bodies.
-static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FVector& AnchorCanonical, FLOAT DrawScale, UBOOL bRevolute )
+static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FVector& AnchorCanonical, FLOAT DrawScale, const FRagdollJointSpec& Spec )
 {
 	const FRagdollBoneDef& DA = GRagdollBoneDefs[BodyA];
 	const FRagdollBoneDef& DB = GRagdollBoneDefs[BodyB];
@@ -80,10 +103,12 @@ static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FVector& Anc
 	b3Transform FrameA = { { LA.X*RAGDOLL_U2M, LA.Y*RAGDOLL_U2M, LA.Z*RAGDOLL_U2M }, b3Quat_identity };
 	b3Transform FrameB = { { LB.X*RAGDOLL_U2M, LB.Y*RAGDOLL_U2M, LB.Z*RAGDOLL_U2M }, b3Quat_identity };
 
-	if( bRevolute )
+	if( Spec.Kind == JK_Hinge )
 	{
 		// Revolute joints rotate about the local Z of the joint frame. Orient
-		// the frame so that local Z points along world Y (the flexion axis).
+		// the frame so that local Z points along world +Y (the medial-lateral
+		// flexion axis for knees and elbows). Both frames share the hinge
+		// rotation, so the reference (zero) angle is the straight limb pose.
 		b3Quat Hinge = b3MakeQuatFromAxisAngle( { 1.0f, 0.0f, 0.0f }, 1.5707963f );
 		FrameA.q = Hinge;
 		FrameB.q = Hinge;
@@ -95,9 +120,12 @@ static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FVector& Anc
 		J.base.localFrameB   = FrameB;
 		J.targetAngle        = 0.0f;
 		J.enableLimit        = true;
-		J.lowerAngle         = -0.9f;
-		J.upperAngle         = 0.9f;
+		J.lowerAngle         = Spec.L0;
+		J.upperAngle         = Spec.L1;
 		J.enableSpring       = false;
+		J.enableMotor        = true;
+		J.maxMotorTorque     = Spec.Friction * 5.0f;
+		J.motorSpeed         = 0.0f;
 		b3CreateRevoluteJoint( S.World, &J );
 	}
 	else
@@ -107,9 +135,15 @@ static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FVector& Anc
 		J.base.bodyIdB       = S.Bodies[BodyB];
 		J.base.localFrameA   = FrameA;
 		J.base.localFrameB   = FrameB;
+		J.enableConeLimit    = true;
+		J.coneAngle          = Spec.L0;
+		J.enableTwistLimit   = true;
+		J.lowerTwistAngle    = Spec.L1;
+		J.upperTwistAngle    = Spec.L2;
 		J.enableSpring       = false;
-		J.enableConeLimit    = false;
-		J.enableTwistLimit   = false;
+		J.enableMotor        = true;
+		J.maxMotorTorque     = Spec.Friction * 5.0f;
+		J.motorVelocity      = b3Vec3_zero;
 		b3CreateSphericalJoint( S.World, &J );
 	}
 }
@@ -224,23 +258,29 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 		S.RestRotations[i] = b3Quat_identity;
 	}
 
-	// Joints.
-	AddJoint( S, BONE_Pelvis,    BONE_Spine,     FVector(  0.0f, 0.0f,  6.0f), DrawScale, false );
-	AddJoint( S, BONE_Spine,     BONE_Neck,      FVector(  0.0f, 0.0f, 22.0f), DrawScale, false );
-	AddJoint( S, BONE_Neck,      BONE_Head,      FVector(  0.0f, 0.0f, 30.0f), DrawScale, false );
-	AddJoint( S, BONE_Spine,     BONE_UpperArmL, FVector(-13.0f, 6.0f, 24.0f), DrawScale, false );
-	AddJoint( S, BONE_Spine,     BONE_UpperArmR, FVector( 13.0f, 6.0f, 24.0f), DrawScale, false );
-	AddJoint( S, BONE_UpperArmL, BONE_ForearmL,  FVector(-13.0f, 8.0f, 12.0f), DrawScale, true );
-	AddJoint( S, BONE_UpperArmR, BONE_ForearmR,  FVector( 13.0f, 8.0f, 12.0f), DrawScale, true );
-	AddJoint( S, BONE_Pelvis,    BONE_ThighL,    FVector( -7.0f, 0.0f, -6.0f), DrawScale, false );
-	AddJoint( S, BONE_Pelvis,    BONE_ThighR,    FVector(  7.0f, 0.0f, -6.0f), DrawScale, false );
-	AddJoint( S, BONE_ThighL,    BONE_ShinL,     FVector( -7.0f, 0.0f,-22.0f), DrawScale, true );
-	AddJoint( S, BONE_ThighR,    BONE_ShinR,     FVector(  7.0f, 0.0f,-22.0f), DrawScale, true );
-	AddJoint( S, BONE_ShinL,     BONE_FootL,     FVector( -7.0f, 2.0f,-34.0f), DrawScale, false );
-	AddJoint( S, BONE_ShinR,     BONE_FootR,     FVector(  7.0f, 2.0f,-34.0f), DrawScale, false );
+	// Joints. All ranges in radians. Spherical joints: cone half-angle about the
+	// vertical + twist range about the limb's own axis. Hinges: one-sided so
+	// knees/elbows flex the anatomically correct direction only.
+	AddJoint( S, BONE_Pelvis,    BONE_Spine,     FVector(  0.0f, 0.0f,  6.0f), DrawScale, { JK_Ball, 0.35f, -0.26f,  0.26f, 0.6f } );
+	AddJoint( S, BONE_Spine,     BONE_Neck,      FVector(  0.0f, 0.0f, 22.0f), DrawScale, { JK_Ball, 0.61f, -0.35f,  0.35f, 0.8f } );
+	AddJoint( S, BONE_Neck,      BONE_Head,      FVector(  0.0f, 0.0f, 30.0f), DrawScale, { JK_Ball, 0.44f, -0.26f,  0.26f, 0.4f } );
+	AddJoint( S, BONE_Spine,     BONE_UpperArmL, FVector(-13.0f, 6.0f, 24.0f), DrawScale, { JK_Ball, 1.40f, -0.44f,  0.44f, 0.7f } );
+	AddJoint( S, BONE_Spine,     BONE_UpperArmR, FVector( 13.0f, 6.0f, 24.0f), DrawScale, { JK_Ball, 1.40f, -0.44f,  0.44f, 0.7f } );
+	AddJoint( S, BONE_UpperArmL, BONE_ForearmL,  FVector(-13.0f, 8.0f, 12.0f), DrawScale, { JK_Hinge, -0.12f, 1.90f, 0.0f, 0.5f } );
+	AddJoint( S, BONE_UpperArmR, BONE_ForearmR,  FVector( 13.0f, 8.0f, 12.0f), DrawScale, { JK_Hinge, -0.12f, 1.90f, 0.0f, 0.5f } );
+	AddJoint( S, BONE_Pelvis,    BONE_ThighL,    FVector( -7.0f, 0.0f, -6.0f), DrawScale, { JK_Ball, 1.22f, -0.52f,  0.52f, 0.8f } );
+	AddJoint( S, BONE_Pelvis,    BONE_ThighR,    FVector(  7.0f, 0.0f, -6.0f), DrawScale, { JK_Ball, 1.22f, -0.52f,  0.52f, 0.8f } );
+	AddJoint( S, BONE_ThighL,    BONE_ShinL,     FVector( -7.0f, 0.0f,-22.0f), DrawScale, { JK_Hinge, -1.70f, 0.12f, 0.0f, 0.6f } );
+	AddJoint( S, BONE_ThighR,    BONE_ShinR,     FVector(  7.0f, 0.0f,-22.0f), DrawScale, { JK_Hinge, -1.70f, 0.12f, 0.0f, 0.6f } );
+	AddJoint( S, BONE_ShinL,     BONE_FootL,     FVector( -7.0f, 2.0f,-34.0f), DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
+	AddJoint( S, BONE_ShinR,     BONE_FootR,     FVector(  7.0f, 2.0f,-34.0f), DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
 
-	// Procedural mannequin mesh.
-	S.Mesh = CreateRagdollMesh( C );
+	// Player mesh (preferred): capture the dead pawn's ULodMesh and attach it to
+	// the bones. Falls back to the procedural box mannequin when the source mesh
+	// isn't a usable vertex-mesh (e.g. skeletal/animated-only content).
+	S.Mesh = CreatePlayerRagdollMesh( C, S );
+	if( !S.Mesh )
+		S.Mesh = CreateRagdollMesh( C );
 	if( S.Mesh )
 		C->Mesh = S.Mesh;
 

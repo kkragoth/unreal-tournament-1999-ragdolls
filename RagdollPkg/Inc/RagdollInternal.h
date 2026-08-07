@@ -52,12 +52,21 @@ enum ERagdollBone
 struct FRagdollState
 {
 	UBOOL         bBuilt;
+	UBOOL         bFrameLogged;
+	UBOOL         bFrameRangeLogged;
 	b3WorldId     World;
 	b3BodyId      Ground;
 	URagdollMesh* Mesh;
 	b3BodyId      Bodies[RAGDOLL_BONE_COUNT];
 	b3Vec3        RestPositions[RAGDOLL_BONE_COUNT];
 	b3Quat        RestRotations[RAGDOLL_BONE_COUNT];
+
+	// Real-mesh mode: per-output-vertex bone assignment (one entry per mesh
+	// vertex). VertOffsets holds each vertex's actor-local offset (UU, DrawScale
+	// applied) from its assigned bone's rest center, so GetFrame can rigidly
+	// attach the player's mesh to the Box3D bodies. Empty in box-mannequin mode.
+	TArray<INT>     VertBones;
+	TArray<FVector> VertOffsets;
 };
 
 // Canonical bone definitions (shared with the mesh builder).
@@ -69,5 +78,12 @@ TMap<AActor*, FRagdollState>& GetRagdollStates();
 // Mesh factory (UnRagdollMesh.cpp). Returns a new URagdollMesh built from the
 // canonical bone definitions for the given carcass.
 URagdollMesh* CreateRagdollMesh( class ARagdollCarcass* Carcass );
+
+// Real-mesh factory (UnRagdollMesh.cpp). Captures the owning carcass's player
+// mesh (ULodMesh) at its current dead-pose frame and returns a URagdollMesh
+// whose vertices are rigidly attached to the nearest Box3D bone (per-vertex
+// assignments are stored in S.VertBones/VertOffsets). Returns NULL if the mesh
+// is not a usable ULodMesh, in which case the caller keeps the box mannequin.
+URagdollMesh* CreatePlayerRagdollMesh( class ARagdollCarcass* Carcass, FRagdollState& S );
 
 #endif
