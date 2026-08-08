@@ -1,126 +1,204 @@
-# Plan: real-mesh skinning via external extraction + rig
+# Plan: multi-model real-mesh ragdolls via Selection meshes (ARCHITECTURE)
 
-Status: **PLANNING** (not started). Supersedes the runtime frame-scan approach that
-was reverted. Read `docs-skinning-findings.md` first — it records every prior
-experiment and the fundamental mismatch this plan works around.
+Status: **PLANNING**. Rewrites the earlier `real-mesh.md` external-extraction idea with
+the per-model pipeline and corrects the "T-pose" diagnosis in `docs-skinning-findings.md`.
+Read that findings doc first — it records every prior experiment.
 
-## The core problem (from findings)
+## Corrected diagnosis (this session's validation)
 
-- The Box3D physics skeleton MUST spawn in a T-pose (limbs spread). Bodies that
-  spawn interpenetrating explode at spawn time.
-- A freshly killed player's real mesh is in a standing pose (arms at sides).
-- Skinning that standing mesh onto the spread T-pose skeleton forces
-  nearest-bone assignment to glue arms to the torso (arm bones starve to 0 verts,
-  torso bones swallow everything) and the verts tear when the bodies swing.
-- No stock animation frame (dead or otherwise) gives a full spread:
-  `Dead2 f=518` best-ever = `{17,81,39,140,25,15,21,12,1,0,0,0,0,0}` — legs 0.
+- The physics skeleton is **NOT a T-pose**. `GRagdollBoneDefs` are arms-DOWN:
+  upper arm box z 17..31, forearm z 0..12, hanging at x=±13 (hip-length arms).
+  The docs' "must spawn in T-pose (limbs spread)" is misleading.
+- The real physics constraint is only: **non-adjacent bodies must not interpenetrate
+  at spawn** (Box3D explodes interpenetrating bodies). Adjacent chain bodies always
+  touch (Pelvis-Thigh, Spine-Neck, ...) and are fine.
+- The reason real-mesh skinning failed is **bone placement, not pose**:
+  - The skeleton's arms only reach the hips (forearm bottom z≈12);
+  - The Selection mesh's hands hang at z≈-36 — the arms reach the ANKLES, ~36-48 UU
+    below the skeleton's hip-length arms (measured on SelectionMale1 frame 0:
+    hands reach z=-39.6).
+  - Nearest-bone binding on ANY arms-down pose starves the arm bones (measured:
+    `UpAL=1, FoAL=3` on SelectionMale1 f0 even after yaw+270 + FitScale).
+- The earlier "aligned" overlay only aligns torso/feet; the ARMS are misplaced in it
+  (0 mesh verts land inside the skeleton arm boxes). Do not trust it for the arms.
+- **Selection viewer pose is a 3/4 turn, not front-facing.** SelectionMale1 frame 0
+  bbox is X[-18.5,7.0]; a +80° yaw correction restores bilateral symmetry (mean
+  mirror distance 2.76 UU). Any front/back symmetric bone derivation must rotate
+  the frame to bind space FIRST (see "Yaw correction" below).
 
-## The strategy
+## Model inventory (Botpack.u, all `Core.LodMesh`)
 
-Do the mesh re-pose and vertex->bone skinning **offline, externally**, instead of
-at runtime:
+    name            verts faces wedges mats frames world X   Y   Z   origin
+    Commando        332   642   487    4    700    56.0 39.6 83.5  (-150,40,0)
+    Soldier         309   595   504    4    700    52.1 40.4 75.9  (-150,40,0)
+    Boss            313   582   446    5    700    57.4 40.4 78.5  (-150,40,0)
+    SGirl           311   599   507    4    681
+    FCommando       351   674   537    3    681
+    SelectionMale1  332   642   478    4     54    25.5 39.8 84.3  (-135,60,0)
+    SelectionMale2  309   595   501    4     54    26.6 39.9 79.9  (-135,60,0)
+    SelectionFemale1 351  674   540    3     54    26.1 56.1 82.7  (0,-100,0)
+    SelectionFemale2 311  599   513    4     54    25.3 57.2 81.4  (0,-100,0)
+    SelectionBoss   313   582   442    5     54    27.4 39.4 83.4  (-135,60,0)
 
-1. Extract the player LODMesh from the `.u` package with a standalone parser.
-2. **Synthesize a T-pose vertex frame** by rotating limb vertex groups about the
-   mesh's real joints. No stock frame provides it, so we construct it.
-3. Assign verts to bones in the T-pose (so arm verts sit next to arm bones),
-   compute per-vertex bind offsets in bone-local space.
-4. Verify externally with a small renderer (standing mesh, T-pose + skeleton
-   overlay, a few deformed poses).
-5. Runtime just loads the precomputed bind data and emits `boneWorld * offset`
-   — the same math the box mannequin already uses, with real verts. Because the
-   bind pose == physics spawn pose (T-pose), there is no spawn tear and no
-   runtime frame scanning / CPU burn.
+- **Per-model mapping (face counts match per pair; wedges differ = UV splits only):**
+  Commando↔SelectionMale1, Soldier↔SelectionMale2, Boss↔SelectionBoss,
+  SGirl↔SelectionFemale2, FCommando↔SelectionFemale1. Unknown model → box fallback.
+- **CORRECTION vs earlier plan:** Commando/SelectionMale1 do NOT share topology —
+  faces match in COUNT (642=642) but wedges differ (487 vs 478). The dataset path is
+  unaffected: we build the `URagdollMesh` ENTIRELY from the Selection dataset
+  (verts/faces/wedges/materials), never from the live pawn mesh geometry. The live
+  mesh only contributes its NAME (dataset lookup) and the pawn's `MultiSkins`
+  (texture slots; renderer reads `Owner->MultiSkins` via `UMesh::GetTexture`).
+- Variance is real: heights 75.9..84.3, female Y-spans 56 vs male 40. **A single
+  canonical skeleton cannot fit all models** -> the skeleton rest pose must be
+  derived per model (or parameterized by per-model joint positions).
 
-## Ground truth to cross-check the parser against
+## Model inventory (Botpack.u, all `Core.LodMesh`)
 
-All from `docs-skinning-findings.md` / prior sessions:
+    name            verts faces frames  world X   Y   Z   origin
+    Commando        332   642   700    56.0 39.6 83.5  (-150,40,0)
+    Soldier         309   595   700    52.1 40.4 75.9  (-150,40,0)
+    Boss            313   582   700    57.4 40.4 78.5  (-150,40,0)
+    SelectionMale1  332   642    54    25.5 39.8 84.3  (-135,60,0)
+    SelectionMale2  309   595    54    26.6 39.9 79.9  (-135,60,0)
+    SelectionFemale1 351  674    54    26.1 56.1 82.7  (0,-100,0)
+    SelectionFemale2 311  599    54    25.3 57.2 81.4  (0,-100,0)
+    SelectionBoss   313   582    54    27.4 39.4 83.4  (-135,60,0)
 
-- ~700 animation frames total.
-- Sequence table (`FMeshAnimSeq` in `Engine\Inc\UnAnim.h:34-46`):
-  `All`, `Dead1[525+13]`, `Dead2[538+16]`, `Dead3[554+13]`, `Dead4[567+16]`,
-  `Dead7[583+21]`, `Dead8[604+18]`, `Dead9[622+20]`, `Dead9B[642+10]`,
-  `Dead11[652+18]` (format: `name[startFrame+numFrames]`).
-- Mesh bounds: `(-1500..2432, -2108..2048, -1596..708)` UU.
-- Mesh import transform (from `CreatePlayerRagdollMesh`):
-  `(vert - Origin)` rotated by `RotOrigin`, scaled by mesh `Scale` and actor
-  `DrawScale` -> actor-local space (pelvis at origin, Z up, arms along +-X),
-  matching `GRagdollBoneDefs`.
-- Physics skeleton: `RAGDOLL_U2M = 0.02`; `GRagdollBoneDefs`
-  (`RagdollCarcass.cpp:44-60`): Pelvis(0,0,0), Spine(0,0,16), Neck(0,0,25),
-  Head(0,0,33), UpperArmL/R(+-13,6,24), ForearmL/R(+-13,8,12),
-  ThighL/R(+-7,0,-12), ShinL/R(+-7,0,-30), FootL/R(+-7,0,-37).
-  `RAGDOLL_BONE_COUNT = 14`.
+Variance is real: heights 75.9..84.3, female Y-spans 56 vs male 40. **A single
+canonical skeleton cannot fit all models** -> the skeleton rest pose must be
+derived per model (or parameterized by per-model joint positions).
 
-## Steps
+## Architecture
 
-### 0. Identify the mesh asset
-- Find which package/export the mod's player mesh comes from (log
-  `C->Mesh` package + export name once from the running game, or scan retail
-  `.u` files for the LODMesh whose sequence table matches the ground truth).
-- Confirm: frame count, sequence table, bounds.
+Offline per-model pipeline (tools/), one-time per player model; runtime loads a
+precomputed dataset. No runtime frame scanning, no CPU burn.
 
-### 1. `tools/extract_mesh.py` — standalone package parser
-- Parse UT99 `.u` package format (header, name table, import/export tables,
-  zlib-compressed export data). Pure Python 3.9, no engine needed.
-- Deserialize the LODMesh/ULodModel: face/tri index list, UVs, per-frame vertex
-  arrays, sequence table, import transform (`Origin`/`RotOrigin`/`Scale`).
-- Output `.npz` + per-frame OBJ (for eyeballing in an external viewer).
+### Offline: `tools/build_rig.py` (per model)
 
-### 2. Verify the parser
-- Compare parsed frame count, sequence names/start/num, and bounds against the
-  ground truth above. Do not proceed until these match exactly.
+1. Extract the Selection mesh with `extract_mesh.py` (verts, faces, wedges,
+   materials, Origin/Scale/RotOrigin, frame 0 = arms-down viewer pose).
+2. **Yaw-correct to bind space.** Search the corrective yaw that minimizes
+   bilateral symmetry error (mirror-across-X distance; SelectionMale1 = +80°,
+   mean mirror dist 2.76 UU). Rotate all frame-0 verts by it so the body faces
+   forward (sagittal plane = X=0). This is what makes the arms a clean `|x|`
+   region separate from the torso (review #2 resolved: no more 3/4-turn tear).
+3. **Derive the 14 bone centers from the mesh geometry** in bind space (vertex
+   clusters): head/neck/torso/pelvis from Z bands, arms by `|x|` clear of the
+   torso half-width, legs below the pelvis; upper-arm/forearm split at the
+   derived elbow line so the forearm reaches the mesh's actual hand line
+   (z≈-36, review #5 resolved by construction). Mirror-average the L/R pairs so
+   the physics skeleton is bilaterally symmetric. Absorbs every model's
+   size/proportion variance. (Do NOT use canonical `GRagdollBoneDefs` centers —
+   they are arm-misplaced.)
+4. Size each bone box to the local geometry; compute the 14 joint anchors from
+   the derived centers (midpoint/limb-line anchors matching the canonical joint
+   set). Verify **non-interpenetration** of non-adjacent bodies (arms clear
+   torso/legs) in the derived pose.
+5. Bind: nearest-bone assignment of every vertex in bind space ->
+   per-vertex `{boneIndex, boneLocalOffset}`. Assert every bone gets verts (no
+   starvation) AND that each bone's own verts are within its box (tight fit).
+6. **Verify externally (headless Blender, `blender.exe -b`):** render an OBJ
+   overlay of the mesh + derived skeleton boxes from front and 3/4 views; check
+   BOTH torso AND arms/legs (review #1 resolved: arms verified per model, not
+   assumed). Save the renders as PNGs in `tools/rig_verify/`.
+7. Emit a dataset (generated C header `RagdollPkg\Src\RagdollDatasets.h`):
+   bind-space verts/faces/wedges/materials + derived bone centers/half-extents/
+   masses + joint anchors + per-vertex bind data. Wedges already include the
+   SpecialVerts offset so they index the dense vert array directly.
 
-### 3. `tools/build_rig.py` — synthesize T-pose + skin
-- Place the 14 bones from `GRagdollBoneDefs` into mesh space using the import
-  transform (pelvis at origin, Z up).
-- Segment verts into limb groups (nearest-bone on standing `All` frame 0).
-- Synthesize a T-pose vertex frame: rotate each limb group about the mesh's
-  joint pivots (shoulder/elbow/hip/knee) into the spread pose. Joint pivots are
-  derived from `GRagdollBoneDefs` and refined visually.
-- Re-assign verts -> bones in the T-pose, compute per-vertex bind offsets in
-  bone-local frame. Assert every bone has verts (no starvation).
-- Emit skin dataset: bind verts, faces, UVs, per-vertex `{boneIndex, offset}`
-  (bone-local), bone rest transforms.
+### Runtime (RagdollPkg native)
 
-### 4. `tools/render_mesh.py` — external verification
-- Minimal software renderer (or OBJ -> image). Render and visually confirm:
-  - (a) standing mesh matches in-game model,
-  - (b) T-pose + 14-bone skeleton overlay is anatomically sane,
-  - (c) a few bone-transformed poses deform without tearing.
-- Iterate here, not in the game. Fast loop.
+1. On `BuildRagdoll`, read `Carcass->Mesh->GetName()` (the dead pawn's `ULodMesh`,
+   e.g. Commando) -> look up its Selection-mesh dataset in the per-model table
+   (live-name → dataset mapping above). Unknown model -> fall back to the box
+   mannequin (unchanged).
+2. Build `URagdollMesh` ENTIRELY from the dataset (verts/faces/wedges/materials +
+   `S.VertBones`/`S.VertOffsets`), using the existing scaffolding in
+   `CreatePlayerRagdollMesh` (`UnRagdollMesh.cpp`): LOD pins, `FaceLevel`,
+   `CollapseWedgeThus`/`CollapsePointThus`, `BuildMeshAdjacency` (review #7).
+   `Mesh->Scale/Origin/RotOrigin` stay neutral (GetFrame emits world space).
+3. Spawn the 14 Box3D bodies at the **derived** rest centers (not canonical
+   defs), scaled by `DrawScale`; add the 14 joints with the **derived** anchors
+   and the SAME joint specs as today (ball/hinge, cone/limits, friction) so the
+   tuned feel is preserved (review #3: specs unchanged, only anchor points move
+   with the derived skeleton; box remains the default gate/fallback).
+4. `GetFrame` emission is unchanged: `boneWorld * bindOffset` per vertex (the
+   existing real-mesh branch already does this).
+5. Textures come from the Carcass actor: `Initfor` already copies
+   `Pawn(Other).MultiSkins[0..3]` onto the corpse, and the renderer resolves
+   per-face textures through `UMesh::GetTexture(Count, Owner)` =
+   `Owner->MultiSkins[Count]`. Populate `Mesh->Textures[0..3]` from
+   `Carcass->MultiSkins` (fallback `Skin` for slot 0) so the corpse wears the
+   player's skin (review #6).
 
-### 5. Runtime integration
-- Embed the skin dataset (static array header, e.g.
-  `RagdollPkg\Inc\RagdollMeshData.h`).
-- Re-enable real-mesh path: set `RAGDOLL_USE_REAL_MESH` = 1 in
-  `RagdollPkg\Src\UnRagdollMesh.cpp`; new `CreatePlayerRagdollMesh` builds the
-  mesh from bind verts instead of the box; `GetFrame` emits
-  `boneWorldTransform * bindOffset` for each vertex.
-- Physics spawns T-pose exactly as it does now -> mesh matches at spawn, no tear.
-- Keep the box mannequin as a fallback flag.
+### Data lifetime / memory
 
-### 6. Playtest
-- Build/deploy/playtest on DM-Deck16 per AGENTS.md (DLL first, then `ucc make`).
-- Confirm corpse = real player model in spread ragdoll, limbs follow the sim.
-- Rig issues get fixed externally (tools), then the header is regenerated —
-  no in-game iteration needed.
+Each dataset is ~332 verts + 642 faces + wedges + materials + 14 bone defs +
+332 bind entries — ~15 KB. Embedded as static arrays in the generated
+`RagdollPkg\Src\RagdollDatasets.h` and compiled into the DLL (no runtime IO).
 
 ## Deliverables
 
-- `tools/extract_mesh.py`, `tools/build_rig.py`, `tools/render_mesh.py`
-- Skin dataset (`.npz` / generated `RagdollPkg\Inc\RagdollMeshData.h`)
-- Updated `docs-skinning-findings.md` with the external approach's outcome.
+- `tools/build_rig.py` (yaw-correct + derive skeleton + bind + verify + emit
+  datasets + headless-Blender render)
+- Generated `RagdollPkg\Src\RagdollDatasets.h` (SelectionMale1/2,
+  SelectionFemale1/2, SelectionBoss) + verify PNGs in `tools/rig_verify/`
+- Native: dataset loader (`CreateDatasetRagdollMesh` in `UnRagdollMesh.cpp`) +
+  live-mesh-name → dataset lookup + `BuildRagdoll` body placement from derived
+  centers + derived joint anchors
+- Updated `docs-skinning-findings.md` with the corrected diagnosis + topology
+  correction
 
-## Out of scope (for now)
+## Out of scope (first pass)
 
-- Smooth multi-bone weights (rigid 1-bone skinning first, matches box path).
-- Per-corpse unique mesh (all corpses share one precomputed skin for the base
-  player model; skin customization later).
-- Any runtime frame scanning.
+- Smooth multi-bone weights (rigid 1-bone skinning first).
+- Custom/modded player meshes (fall back to box until a dataset exists).
+- Runtime re-rigging (everything is precomputed offline).
 
 ## GLog constraint (critical)
 
 Any runtime logging must stay well under 1000 chars per line — `TCHAR Ch[1024]`
-in `Core\Inc\FOutputDeviceFile.h:69-71` overflows to AV `0xc0000005` /
-fail-fast `0xc0000409`.
+in `Core\Inc\FOutputDeviceFile.h:69-71` overflows to AV `0xc0000005`.
+
+## Adverse review — resolutions (each risk now has a concrete answer)
+
+1. **Arms were never actually aligned** → RESOLVED BY CONSTRUCTION. Bone centers
+   are derived from the mesh's own geometry (arm region by `|x|` clear of the
+   torso, split at the derived elbow), so the bones sit ON the mesh's arm line by
+   definition. Headless-Blender render of mesh+skeleton OBJ overlay is a hard
+   gate before any native work.
+2. **Selection viewer frames are asymmetric** → RESOLVED. Yaw-correct frame 0 to
+   bind space (bilateral-symmetry search), then mirror-average L/R bone pairs.
+   Binding happens in that symmetric bind space.
+3. **Per-model physics changes feel** → MITIGATED. Joint specs (cone/hinge
+   limits, friction, motor) are byte-identical; only anchor points move with the
+   derived skeleton. Derived centers for the 5 stock models are within ~10 UU of
+   canonical, so reach/mass distribution barely shifts. Box remains the gate and
+   the fallback for unknown models. Playtest tuning is milestone 2.
+4. **Vertex clustering is brittle** → ADDRESSED. Region partitioning uses Z bands
+   + `|x|` separation (not free clustering) with per-model thresholds derived
+   from the frame bbox; plus hard assertions (every bone ≥ verts, each bone's
+   verts inside its box, L/R counts within tolerance) and the Blender render.
+5. **Skeleton hands ~11 UU short of mesh hands** → RESOLVED BY CONSTRUCTION. The
+   derived forearm center sits at the mesh's actual hand line (z≈-36); the elbow
+   hinge anchor moves with it. No arbitrary bone lengthening — the bone follows
+   the mesh.
+6. **Materials/skins** → RESOLVED. `RagdollCarcass::Initfor` already copies
+   `Pawn.MultiSkins[0..3]`; renderer reads `Owner->MultiSkins` per face via
+   `UMesh::GetTexture`. Dataset path fills `Mesh->Textures[0..3]` from it.
+7. **LOD/scaffolding** → RESOLVED. The dataset path reuses the exact
+   `CreatePlayerRagdollMesh` scaffolding (LOD pins, FaceLevel,
+   CollapseWedgeThus/PointThus, BuildMeshAdjacency); dataset wedge iVertex values
+   are baked (SpecialVerts included) to index the dense vert array directly.
+8. **Spawning inside geometry** → RE-CHECK IN PLAYTEST. `ClearCorpseSpawn` lifts
+   bodies that spawn embedded in level BSP based on the actual body boxes, so it
+   adapts to per-model sizes automatically; verify on DM-Deck16 stairs/ramps.
+
+## Milestones
+
+1. `build_rig.py` + headless-Blender-verified Commando/SelectionMale1 dataset
+   (arms confirmed on the arm line, not assumed).
+2. Native loader + BuildRagdoll from dataset; DM-Deck16 playtest (DLL first,
+   then `ucc make` per AGENTS.md).
+3. Scale to all 5 male/female models; fallback rules.
