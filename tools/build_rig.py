@@ -267,7 +267,7 @@ def compute_anchors(centers):
     thigh_x = abs(c[8][0])
     mz = lambda a, b: (a[2] + b[2]) / 2.0
     shldr_z = c[4][2] + (c[4][2] - c[6][2]) / 2.0  # upper arm top
-    hip_z = c[8][2] - (c[8][2] - c[10][2]) / 2.0   # thigh top
+    hip_z = c[8][2] + (c[8][2] - c[10][2]) / 2.0   # thigh top
     return [
         (0.0, 0.0, mz(c[0], c[1])),                 # pelvis-spine
         (0.0, 0.0, mz(c[1], c[2])),                 # spine-neck
