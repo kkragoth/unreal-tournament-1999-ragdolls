@@ -1,8 +1,9 @@
 /*=============================================================================
 	UnRagdollMesh.cpp
 	Ragdoll mesh: either the procedural box mannequin (fallback) or the dead
-	player's real mesh captured at death and rigidly attached to the Box3D
-	bones (per-vertex nearest-bone assignment).
+	player's real mesh built from a precomputed per-model dataset (Selection
+	viewer mesh, bind-space geometry + per-vertex bone assignment) and rigidly
+	attached to the Box3D bones via GetFrame's boneWorld * bindOffset emission.
 =============================================================================*/
 
 #include "UnRagdollMesh.h"
@@ -13,13 +14,6 @@
 // instead of live Box3D bone transforms. Set to 1 to isolate whether the
 // renderer chokes on the mesh data vs the bone-deformation emission.
 #define RAGDOLL_TEST_STATIC 0
-
-// Real-mesh skinning is DISABLED: the dead player's standing pose (arms at
-// sides) can't be attached to the spread T-pose physics skeleton without the
-// nearest-bone assignment gluing limbs to the torso and tearing when the bodies
-// swing. Set to 1 to re-enable the capture path (createPlayerRagdollMesh below);
-// 0 makes every corpse fall back to the procedural box mannequin.
-#define RAGDOLL_USE_REAL_MESH 0
 
 /*-----------------------------------------------------------------------------
 	Box corner helper (box-mannequin mode).
@@ -184,307 +178,44 @@ URagdollMesh* CreateRagdollMesh( ARagdollCarcass* Carcass )
 }
 
 /*-----------------------------------------------------------------------------
-	Real-mesh capture: attach the dead player's ULodMesh to the bones.
+	Real-mesh creation from a precomputed per-model dataset.
 -----------------------------------------------------------------------------*/
 
 URagdollMesh* CreatePlayerRagdollMesh( ARagdollCarcass* Carcass, FRagdollState& S )
 {
 	guard(CreatePlayerRagdollMesh);
-#if RAGDOLL_USE_REAL_MESH
 	ULodMesh* Src = Cast<ULodMesh>( Carcass ? Carcass->Mesh : NULL );
-	if( !Src || !Src->Verts.Num() || Src->FrameVerts <= 0 || Src->Faces.Num() == 0 )
+	if( !Src )
+		return NULL;
+	const FRagdollDatasetEntry* DS = FindRagdollDataset( Src->GetName() );
+	if( !DS )
+	{
+		debugf( TEXT("RagdollMesh: no dataset for mesh=%s -> box fallback"), Src->GetName() );
+		return NULL;
+	}
+
+	const INT NumVerts = DS->NumVerts;
+	if( NumVerts <= 0 || DS->NumFaces <= 0 || DS->NumWedges <= 0 || DS->NumMats <= 0 )
 		return NULL;
 
-	FLOAT DrawScale = ( Carcass->DrawScale > 0.0f ) ? Carcass->DrawScale : 1.0f;
-
-	// Mesh import transform: (vert - Origin) rotated by RotOrigin, then scaled
-	// by the mesh Scale and the actor DrawScale -> actor-local space, matching
-	// the bone-definition frame (pelvis at origin, Z up, arms along +-X).
-	FCoords RotCoords = GMath.UnitCoords * Src->RotOrigin;
-	const FVector MOrigin = Src->Origin;
-	const FLOAT MX = Src->Scale.X, MY = Src->Scale.Y, MZ = Src->Scale.Z;
-
-	const INT NumVerts = Src->FrameVerts;
-	INT MaxWedgeVert = 0;
-	for( INT f=0; f<Src->Wedges.Num(); f++ )
-		MaxWedgeVert = Max( MaxWedgeVert, (INT)Src->Wedges(f).iVertex );
-	debugf( TEXT("RagdollMesh: probe mesh=%s FrameVerts=%i ModelVerts=%i SpecialVerts=%i OldFrameVerts=%i Remap=%i WedgeMax=%i AnimFrames=%i"),
-		Src->GetName(), Src->FrameVerts, Src->ModelVerts, Src->SpecialVerts, Src->OldFrameVerts, Src->RemapAnimVerts.Num(), MaxWedgeVert, Src->AnimFrames );
-
-	// Reference frame + skeleton fit.
-	//
-	// The corpse's own anim name ('Dead') is NOT a real sequence in the mesh
-	// (Commando has Dead1..Dead9B + DeathEnd instead), so GetAnimSeq returns
-	// NULL and the old code fell back to iFrame=0, frame 0 of 'All' - a STANDING
-	// pose. Standing never matches the T-pose skeleton: the capture came out a
-	// thin vertical stick (Z -86..84) and nearest-center assignment glued the
-	// whole torso onto the Head bone (143 verts). Instead we scan EVERY frame of
-	// EVERY sequence (dead anims are contorted and never spread; Taunt/Wave/Flip
-	// frames hold arms out like the T-pose), fit each to the skeleton's body
-	// length, run the nearest-bone assignment, and pick the frame whose verts
-	// distribute most evenly across all 14 bones (smallest max-min range). A
-	// spread frame wins because its limbs sit where the T-pose bones expect them.
-	//
-	// FitScale maps the captured pose (mesh units, up to ~2x the skeleton) onto
-	// the skeleton scale so bone centers and vertex offsets agree.
-	FLOAT SkeletonBodyLen = ( ( GRagdollBoneDefs[BONE_Head].CZ + GRagdollBoneDefs[BONE_Head].HZ )
-		- ( GRagdollBoneDefs[BONE_FootL].CZ - GRagdollBoneDefs[BONE_FootL].HZ ) ) * DrawScale;
-	FLOAT FitScale = 1.0f;
-	INT iFrame = 0;
-	{
-		INT   BestRange = 0x7fffffff;
-		FLOAT BestMean  = 1e30f;
-		// Top-6 candidates by (min bone count desc, range asc) so the sprawl
-		// landscape is visible in the log.
-		INT    TopMin[6];  FLOAT TopRange[6];  FLOAT TopMean[6];  INT TopFrame[6];
-		FString TopSeq[6];
-		appMemset( TopMin, -1, sizeof(TopMin) );
-		for( INT s=0; s<Src->AnimSeqs.Num(); s++ )
-		{
-			const FMeshAnimSeq& AS = Src->AnimSeqs(s);
-			if( AS.NumFrames <= 0 )
-				continue;
-			for( INT fr=0; fr<AS.NumFrames; fr++ )
-			{
-				INT F = AS.StartFrame + fr;
-				if( F < 0 || F >= Src->AnimFrames )
-					continue;
-
-				// Transformed bbox of this frame in actor-local space.
-				FVector FMin(1e30f,1e30f,1e30f), FMax(-1e30f,-1e30f,-1e30f);
-				for( INT k=0; k<NumVerts; k++ )
-				{
-					FVector P( Src->Verts( F*NumVerts + k ).Vector() );
-					P = ( P - MOrigin ).TransformPointBy( RotCoords );
-					P = FVector( P.X*MX, P.Y*MY, P.Z*MZ ) * DrawScale;
-					FMin.X=Min(FMin.X,P.X); FMin.Y=Min(FMin.Y,P.Y); FMin.Z=Min(FMin.Z,P.Z);
-					FMax.X=Max(FMax.X,P.X); FMax.Y=Max(FMax.Y,P.Y); FMax.Z=Max(FMax.Z,P.Z);
-				}
-				FVector FD = FMax - FMin;
-				FLOAT LongAxis = Max( FD.X, Max( FD.Y, FD.Z ) );
-				FLOAT Fit = ( LongAxis > 0.0f ) ? SkeletonBodyLen / LongAxis : 1.0f;
-
-				// Score the nearest-bone assignment for this (fitted) frame.
-				INT PerBone[ RAGDOLL_BONE_COUNT ];
-				appMemset( PerBone, 0, sizeof(PerBone) );
-				FLOAT DistSum = 0.0f;
-				for( INT k=0; k<NumVerts; k++ )
-				{
-					FVector P( Src->Verts( F*NumVerts + k ).Vector() );
-					P = ( P - MOrigin ).TransformPointBy( RotCoords );
-					P = FVector( P.X*MX, P.Y*MY, P.Z*MZ ) * DrawScale * Fit;
-					INT BestBone = 0;
-					FLOAT BestD = 1e30f;
-					for( INT b=0; b<RAGDOLL_BONE_COUNT; b++ )
-					{
-						const FRagdollBoneDef& D = GRagdollBoneDefs[b];
-						FLOAT dx = P.X - D.CX * DrawScale;
-						FLOAT dy = P.Y - D.CY * DrawScale;
-						FLOAT dz = P.Z - D.CZ * DrawScale;
-						FLOAT d = dx*dx + dy*dy + dz*dz;
-						if( d < BestD )
-						{
-							BestD = d;
-							BestBone = b;
-						}
-					}
-					PerBone[ BestBone ]++;
-					DistSum += appSqrt( BestD );
-				}
-				INT MaxCount = PerBone[0], MinCount = PerBone[0];
-				for( INT b=1; b<RAGDOLL_BONE_COUNT; b++ )
-				{
-					MaxCount = Max( MaxCount, PerBone[b] );
-					MinCount = Min( MinCount, PerBone[b] );
-				}
-				INT Range = MaxCount - MinCount;
-				FLOAT Mean = DistSum / NumVerts;
-				// Track the 6 frames with the highest MinCount (bones not
-				// starved), tie-broken by smallest range then smallest mean.
-				for( INT t=0; t<6; t++ )
-				{
-					if( TopMin[t] < 0 || MinCount > TopMin[t]
-						|| ( MinCount == TopMin[t] && ( Range < TopRange[t] || ( Range == TopRange[t] && Mean < TopMean[t] ) ) ) )
-					{
-						for( INT u=5; u>t; u-- )
-						{
-						TopMin[u]=TopMin[u-1]; TopRange[u]=TopRange[u-1]; TopMean[u]=TopMean[u-1];
-						TopFrame[u]=TopFrame[u-1]; TopSeq[u]=TopSeq[u-1];
-					}
-					TopMin[t]=MinCount; TopRange[t]=(FLOAT)Range; TopMean[t]=Mean;
-					TopFrame[t]=F; TopSeq[t]=*AS.Name;
-						break;
-					}
-				}
-				// Even distribution = every body part owns its verts; among
-				// ties the one whose verts sit closest to their bones.
-				if( Range < BestRange || ( Range == BestRange && Mean < BestMean ) )
-				{
-					BestRange = Range;
-					BestMean  = Mean;
-					FitScale  = Fit;
-					iFrame    = F;
-				}
-			}
-		}
-		for( INT t=0; t<6 && TopMin[t] >= 0; t++ )
-			debugf( TEXT("RagdollMesh:   cand%i seq=%s f=%i min=%i range=%.0f mean=%.1f"),
-				t, *TopSeq[t], TopFrame[t], TopMin[t], TopRange[t], TopMean[t] );
-		debugf( TEXT("RagdollMesh: pick bestframe=%i fit=%.3f skelLen=%.1f range=%i meanDist=%.1f"),
-			iFrame, FitScale, SkeletonBodyLen, BestRange, BestMean );
-	}
-	if( iFrame < 0 )
-		iFrame = 0;
-	if( iFrame >= Src->AnimFrames )
-		iFrame = Src->AnimFrames - 1;
-
+	// Per-vertex bone assignment for GetFrame (bind space, DrawScale=1; GetFrame
+	// scales the offsets by the actor DrawScale when emitting).
 	S.VertBones.Empty( NumVerts );
 	S.VertOffsets.Empty( NumVerts );
 	S.VertBones.Add( NumVerts );
 	S.VertOffsets.Add( NumVerts );
-
 	for( INT k=0; k<NumVerts; k++ )
 	{
-		FMeshVert MV = Src->Verts( iFrame * NumVerts + k );
-		FVector P( MV.X, MV.Y, MV.Z );
-		P = ( P - MOrigin ).TransformPointBy( RotCoords );
-		P = FVector( P.X * MX, P.Y * MY, P.Z * MZ ) * DrawScale * FitScale;
-
-		// Attach to the nearest bone center (actor-local, DrawScale applied).
-		INT BestBone = 0;
-		FLOAT BestD = 1e30f;
-		for( INT b=0; b<RAGDOLL_BONE_COUNT; b++ )
-		{
-			const FRagdollBoneDef& D = GRagdollBoneDefs[b];
-			FLOAT dx = P.X - D.CX * DrawScale;
-			FLOAT dy = P.Y - D.CY * DrawScale;
-			FLOAT dz = P.Z - D.CZ * DrawScale;
-			FLOAT d = dx*dx + dy*dy + dz*dz;
-			if( d < BestD )
-			{
-				BestD = d;
-				BestBone = b;
-			}
-		}
-		S.VertBones(k)   = BestBone;
-		S.VertOffsets(k) = P - FVector(
-			GRagdollBoneDefs[BestBone].CX * DrawScale,
-			GRagdollBoneDefs[BestBone].CY * DrawScale,
-			GRagdollBoneDefs[BestBone].CZ * DrawScale );
-	}
-
-	{
-		FVector PMin( 1e30f, 1e30f, 1e30f ), PMax( -1e30f, -1e30f, -1e30f );
-		FVector RMin( 1e30f, 1e30f, 1e30f ), RMax( -1e30f, -1e30f, -1e30f );
-		INT PerBone[ RAGDOLL_BONE_COUNT ];
-		appMemset( PerBone, 0, sizeof(PerBone) );
-		for( INT k=0; k<NumVerts; k++ )
-		{
-			FVector P( Src->Verts( iFrame * NumVerts + k ).Vector() );
-			RMin.X = Min( RMin.X, P.X ); RMin.Y = Min( RMin.Y, P.Y ); RMin.Z = Min( RMin.Z, P.Z );
-			RMax.X = Max( RMax.X, P.X ); RMax.Y = Max( RMax.Y, P.Y ); RMax.Z = Max( RMax.Z, P.Z );
-			P = ( P - MOrigin ).TransformPointBy( RotCoords );
-			P = FVector( P.X * MX, P.Y * MY, P.Z * MZ ) * DrawScale * FitScale;
-			PMin.X = Min( PMin.X, P.X ); PMin.Y = Min( PMin.Y, P.Y ); PMin.Z = Min( PMin.Z, P.Z );
-			PMax.X = Max( PMax.X, P.X ); PMax.Y = Max( PMax.Y, P.Y ); PMax.Z = Max( PMax.Z, P.Z );
-			PerBone[ S.VertBones(k) ]++;
-		}
-		debugf( TEXT("RagdollMesh: capture rawmesh=%s rmin=(%.1f,%.1f,%.1f) rmax=(%.1f,%.1f,%.1f)"), Src->GetName(), RMin.X, RMin.Y, RMin.Z, RMax.X, RMax.Y, RMax.Z );
-
-		// Source-mesh topology probe: count the SOURCE's own long-edge triangles
-		// using its raw per-frame verts (the exact indices the engine reads when
-		// it renders this mesh normally). If the source itself has ~0 spikes, our
-		// emitted buffer order must differ from the source's render indexing.
-		{
-			FVector SMin( 1e30f, 1e30f, 1e30f ), SMax( -1e30f, -1e30f, -1e30f );
-			for( INT k=0; k<NumVerts; k++ )
-			{
-				FVector P = Src->Verts( iFrame * NumVerts + k ).Vector();
-				SMin.X = Min( SMin.X, P.X ); SMin.Y = Min( SMin.Y, P.Y ); SMin.Z = Min( SMin.Z, P.Z );
-				SMax.X = Max( SMax.X, P.X ); SMax.Y = Max( SMax.Y, P.Y ); SMax.Z = Max( SMax.Z, P.Z );
-			}
-			FVector SD = SMax - SMin;
-			FLOAT SDiag = appSqrt( SD.X*SD.X + SD.Y*SD.Y + SD.Z*SD.Z );
-			FLOAT SThresh = SDiag * 0.6f;
-			INT nSpike = 0;
-			for( INT f=0; f<Src->Faces.Num(); f++ )
-			{
-				FVector T[3];
-				INT nValid = 0;
-				for( INT j=0; j<3; j++ )
-				{
-					INT w = Src->Faces( f ).iWedge[j];
-					if( w < 0 || w >= Src->Wedges.Num() ) continue;
-					INT v = Src->Wedges( w ).iVertex;
-					if( v < 0 || v >= NumVerts ) continue;
-					T[nValid++] = Src->Verts( iFrame * NumVerts + v ).Vector();
-				}
-				if( nValid == 3 )
-				{
-					FLOAT MaxEdge = 0.0f;
-					for( INT a=0; a<3; a++ )
-						for( INT b=a+1; b<3; b++ )
-							MaxEdge = Max( MaxEdge, FDist( T[a], T[b] ) );
-					if( MaxEdge > SThresh )
-						nSpike++;
-				}
-			}
-			debugf( TEXT("RagdollMesh: SrcTris srcmesh=%s faces=%i wedgeMax=%i diag=%.0f thresh=%.0f spike=%i"),
-				Src->GetName(), Src->Faces.Num(), Src->Wedges.Num(), SDiag, SThresh, nSpike );
-		}
-		debugf( TEXT("RagdollMesh: capture mesh=%s Pmin=(%.1f,%.1f,%.1f) Pmax=(%.1f,%.1f,%.1f) bones={%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i}"),
-			Src->GetName(), PMin.X, PMin.Y, PMin.Z, PMax.X, PMax.Y, PMax.Z,
-			PerBone[0],PerBone[1],PerBone[2],PerBone[3],PerBone[4],PerBone[5],PerBone[6],PerBone[7],
-			PerBone[8],PerBone[9],PerBone[10],PerBone[11],PerBone[12],PerBone[13] );
-		debugf( TEXT("RagdollMesh: capture srcmesh=%s origin=(%.1f,%.1f,%.1f) scale=(%.3f,%.3f,%.3f) rot=(%i,%i,%i) animseq=%s animframe=%.2f"),
-			Src->GetName(), MOrigin.X, MOrigin.Y, MOrigin.Z, Src->Scale.X, Src->Scale.Y, Src->Scale.Z,
-			Src->RotOrigin.Pitch, Src->RotOrigin.Yaw, Src->RotOrigin.Roll,
-			Carcass ? *Carcass->AnimSequence : TEXT("none"), Carcass ? Carcass->AnimFrame : 0.0f );
-
-		// Frame enumeration probe: dump every anim sequence, then the transformed
-		// bbox of each frame in the corpse's current sequence, so a sprawled
-		// (arms-out, legs-straight) dead frame can be pinned for the capture
-		// instead of relying on the actor's AnimFrame. A standing stick (small X,
-		// large Z) never matches the T-pose skeleton; a flat sprawl does.
-		{
-			// NOTE: keep every line under ~1000 chars. GLog formats into a fixed
-			// stack buffer (FOutputDeviceFile::Serialize uses Ch[1024]); longer
-			// lines overflow it and crash with a stack-buffer-overrun fail-fast.
-			const FMeshAnimSeq* Seq2 = Src->GetAnimSeq( Carcass ? Carcass->AnimSequence : NAME_None );
-			INT F0 = Seq2 ? Seq2->StartFrame : 0;
-			INT FN = Seq2 ? Seq2->NumFrames : 0;
-			debugf( TEXT("RagdollMesh: SeqFrames seq=%s iframe=%i start=%i num=%i all=%i"),
-				Carcass ? *Carcass->AnimSequence : TEXT("none"), iFrame, F0, FN, Src->AnimFrames );
-			for( INT s=0; s<Src->AnimSeqs.Num(); s++ )
-			{
-				const FMeshAnimSeq& AS = Src->AnimSeqs(s);
-				debugf( TEXT("RagdollMesh:   seq %s start=%i num=%i"), *AS.Name, AS.StartFrame, AS.NumFrames );
-			}
-			// Dump the chosen frame's transformed bbox so the sprawl can be
-			// visually verified (flat/small Z, wide X/Y = lying corpse).
-			{
-				FVector FMin(1e30f,1e30f,1e30f), FMax(-1e30f,-1e30f,-1e30f);
-				for( INT k=0; k<NumVerts; k++ )
-				{
-					FVector P = Src->Verts( iFrame*NumVerts + k ).Vector();
-					P = ( P - MOrigin ).TransformPointBy( RotCoords );
-					P = FVector( P.X*MX, P.Y*MY, P.Z*MZ ) * DrawScale * FitScale;
-					FMin.X=Min(FMin.X,P.X); FMin.Y=Min(FMin.Y,P.Y); FMin.Z=Min(FMin.Z,P.Z);
-					FMax.X=Max(FMax.X,P.X); FMax.Y=Max(FMax.Y,P.Y); FMax.Z=Max(FMax.Z,P.Z);
-				}
-				FVector D = FMax-FMin;
-				debugf( TEXT("RagdollMesh:   chosen frame=%i bbox(X%.0f,Y%.0f,Z%.0f)"), iFrame, D.X, D.Y, D.Z );
-			}
-		}
+		S.VertBones( k )   = DS->VertBones[k];
+		S.VertOffsets( k ) = DS->VertOffsets[k];
 	}
 
 	URagdollMesh* Mesh = ConstructObject<URagdollMesh>( URagdollMesh::StaticClass(), UObject::GetTransientPackage(), NAME_None, RF_Public );
 	if( !Mesh )
 		return NULL;
 
-	// Our GetFrame emits world-space verts from the Box3D bodies, so the
-	// engine's model->view chain must not re-apply the source mesh import
-	// transform (Origin/Scale/RotOrigin stay neutral).
+	// GetFrame emits world-space verts from the Box3D bodies, so the engine's
+	// model->view chain must not re-apply any import transform.
 	Mesh->Scale           = FVector( 1, 1, 1 );
 	Mesh->Origin          = FVector( 0, 0, 0 );
 	Mesh->RotOrigin       = FRotator( 0, 0, 0 );
@@ -494,37 +225,42 @@ URagdollMesh* CreatePlayerRagdollMesh( ARagdollCarcass* Carcass, FRagdollState& 
 	Mesh->AnimFrames      = 1;
 	Mesh->WeaponBoneIndex = -1;
 
-	// Fallback frame data = captured reference pose (fitted actor-local verts,
-	// matching the skinned emission so the no-state GetFrame path shows the
-	// same corpse pose).
+	// Fallback frame data = the bind pose (only read when GetFrame has no state).
 	for( INT k=0; k<NumVerts; k++ )
+		new( Mesh->Verts ) FMeshVert( DS->Verts[k] );
+
+	// Geometry from the dataset. Wedge iVertex already indexes the dense array.
+	Mesh->Faces.Add( DS->NumFaces );
+	for( INT f=0; f<DS->NumFaces; f++ )
+		Mesh->Faces( f ) = DS->Faces[f];
+	Mesh->Wedges.Add( DS->NumWedges );
+	for( INT w=0; w<DS->NumWedges; w++ )
+		Mesh->Wedges( w ) = DS->Wedges[w];
+	Mesh->Materials.Add( DS->NumMats );
+	for( INT m=0; m<DS->NumMats; m++ )
+		Mesh->Materials( m ) = DS->Materials[m];
+
+	// Textures: the renderer resolves each face via UMesh::GetTexture(Count,
+	// Owner) = Owner->MultiSkins[Count] (the Carcass copies the dead player's
+	// MultiSkins in Initfor), so this array is just the fallback for empty slots.
+	for( INT m=0; m<DS->NumMats; m++ )
 	{
-		FMeshVert MV = Src->Verts( iFrame * NumVerts + k );
-		FVector P( MV.X, MV.Y, MV.Z );
-		P = ( P - MOrigin ).TransformPointBy( RotCoords );
-		P = FVector( P.X * MX, P.Y * MY, P.Z * MZ ) * DrawScale * FitScale;
-		new( Mesh->Verts ) FMeshVert( P );
+		UTexture* Skin = NULL;
+		if( Carcass->MultiSkins[m] )
+			Skin = Carcass->MultiSkins[m];
+		else if( Carcass->Skin )
+			Skin = Carcass->Skin;
+		INT TexIndex = Mesh->Textures.Add();
+		Mesh->Textures( TexIndex ) = Skin;
 	}
 
-	// Geometry: copy the source mesh's faces, wedges, materials, textures.
-	// Wedge iVertex indexes directly into the per-frame vert array (UT99 LOD
-	// meshes bake the SpecialVerts offset and RemapAnimVerts at load time).
-	Mesh->Faces     = Src->Faces;
-	Mesh->Wedges    = Src->Wedges;
-	Mesh->Materials = Src->Materials;
-	Mesh->Textures  = Src->Textures;
-
-	// LOD scaffolding. URender::DrawLodMesh reads FaceLevel/CollapseWedgeThus/
-	// CollapsePointThus for every face; leaving them empty is an out-of-bounds
-	// read (garbage triangles + access violation). Pin full detail so no LOD
-	// collapse happens and the source wedge iVertex values (baked at load to
-	// index the dense per-frame vert array) match our FrameVerts emission.
+	// LOD scaffolding (see CreateRagdollMesh for why this must exist).
 	Mesh->LODMinVerts   = Mesh->ModelVerts;
 	Mesh->LODStrength   = 0.0f;
 	Mesh->LODMorph      = 0.0f;
 	Mesh->LODZDisplace  = 0.0f;
 	Mesh->LODHysteresis = 0.0f;
-	Mesh->MeshScaleMax  = Max( Src->MeshScaleMax, 1.0f );
+	Mesh->MeshScaleMax  = 1.0f;
 	Mesh->FaceLevel.Add( Mesh->Faces.Num() );
 	for( INT f=0; f<Mesh->Faces.Num(); f++ )
 		Mesh->FaceLevel( f ) = 0;
@@ -534,21 +270,12 @@ URagdollMesh* CreatePlayerRagdollMesh( ARagdollCarcass* Carcass, FRagdollState& 
 	Mesh->CollapsePointThus.Add( Mesh->FrameVerts );
 	for( INT v=0; v<Mesh->FrameVerts; v++ )
 		Mesh->CollapsePointThus( v ) = (_WORD)v;
-	// Per-vertex lighting adjacency; the renderer reads Connects/VertLinks for
-	// every drawn vertex (see comment above BuildMeshAdjacency).
 	BuildMeshAdjacency( Mesh );
 
-	debugf( TEXT("RagdollMesh: CreatePlayerRagdollMesh mesh=%s verts=%i faces=%i frame=%i bones=%i"),
-		Src->GetName(), NumVerts, Mesh->Faces.Num(), iFrame, RAGDOLL_BONE_COUNT );
+	debugf( TEXT("RagdollMesh: CreatePlayerRagdollMesh mesh=%s dataset=%s verts=%i faces=%i wedges=%i mats=%i"),
+		Src->GetName(), DS->DatasetName, NumVerts, DS->NumFaces, DS->NumWedges, DS->NumMats );
 	return Mesh;
 	unguard;
-#else
-	// Real-mesh skinning disabled — all corpses render as the box mannequin.
-	// The standing corpse pose cannot attach to the spread T-pose physics
-	// skeleton (see docs-skinning-findings.md).
-	unguard;
-	return NULL;
-#endif
 }
 
 /*-----------------------------------------------------------------------------
@@ -592,7 +319,7 @@ void URagdollMesh::GetFrame( FVector* Verts, INT Size, FCoords Coords, AActor* O
 				FVector Off = S->VertOffsets(d);
 				b3WorldTransform T = b3Body_GetTransform( S->Bodies[Bone] );
 				FVector Center( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
-				b3Vec3 Rot = b3RotateVector( T.q, { Off.X, Off.Y, Off.Z } );
+				b3Vec3 Rot = b3RotateVector( T.q, { Off.X * DrawScale, Off.Y * DrawScale, Off.Z * DrawScale } );
 				FVector Pos = Center + FVector( Rot.x, Rot.y, Rot.z );
 				debugf( TEXT("RagdollMesh: realvert[%i] bone=%i off=(%.1f,%.1f,%.1f) world=(%.1f,%.1f,%.1f) ownerloc=(%.1f,%.1f,%.1f)"),
 					d, Bone, Off.X, Off.Y, Off.Z, Pos.X, Pos.Y, Pos.Z,
@@ -656,13 +383,13 @@ void URagdollMesh::GetFrame( FVector* Verts, INT Size, FCoords Coords, AActor* O
 		{
 			// Real-mesh mode: each vertex is rigidly attached to its assigned
 			// bone. The bone's current world transform places it; the stored
-			// actor-local offset (DrawScale applied, from the bone rest center)
-			// is rotated by the bone's current world rotation.
+			// actor-local offset (bind space, DrawScale applied here) is rotated
+			// by the bone's current world rotation.
 			INT Bone = S->VertBones(i);
 			FVector Off = S->VertOffsets(i);
 			b3WorldTransform T = b3Body_GetTransform( S->Bodies[Bone] );
 			FVector Center( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
-			b3Vec3 Rot = b3RotateVector( T.q, { Off.X, Off.Y, Off.Z } );
+			b3Vec3 Rot = b3RotateVector( T.q, { Off.X * DrawScale, Off.Y * DrawScale, Off.Z * DrawScale } );
 			Pos = Center + FVector( Rot.x, Rot.y, Rot.z );
 		}
 		else if( bBoxMesh )

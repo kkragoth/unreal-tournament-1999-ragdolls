@@ -93,11 +93,12 @@ struct FRagdollJointSpec
 };
 
 // Anchor offsets are canonical (relative to the pelvis) and are scaled by
-// DrawScale here to match the scaled bodies.
-static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FVector& AnchorCanonical, FLOAT DrawScale, const FRagdollJointSpec& Spec )
+// DrawScale here to match the scaled bodies. Defs selects the active skeleton:
+// GRagdollBoneDefs (box fallback) or a per-model dataset's derived bones.
+static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FRagdollBoneDef* Defs, const FVector& AnchorCanonical, FLOAT DrawScale, const FRagdollJointSpec& Spec )
 {
-	const FRagdollBoneDef& DA = GRagdollBoneDefs[BodyA];
-	const FRagdollBoneDef& DB = GRagdollBoneDefs[BodyB];
+	const FRagdollBoneDef& DA = Defs[BodyA];
+	const FRagdollBoneDef& DB = Defs[BodyB];
 	FVector LA = DrawScale * ( AnchorCanonical - FVector( DA.CX, DA.CY, DA.CZ ) );
 	FVector LB = DrawScale * ( AnchorCanonical - FVector( DB.CX, DB.CY, DB.CZ ) );
 	b3Transform FrameA = { { LA.X*RAGDOLL_U2M, LA.Y*RAGDOLL_U2M, LA.Z*RAGDOLL_U2M }, b3Quat_identity };
@@ -159,6 +160,18 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	FLOAT DrawScale = C->DrawScale > 0.0f ? C->DrawScale : 1.0f;
 	FVector Origin  = C->Location;
 
+	// Per-model dataset (derived skeleton + anchors) or canonical box skeleton.
+	// The Carcass carries the dead pawn's ULodMesh (set by Initfor before
+	// BuildRagdoll), so its name resolves the dataset for real-mesh corpses.
+	const FRagdollDatasetEntry* DS = NULL;
+	ULodMesh* LiveMesh = Cast<ULodMesh>( C->Mesh );
+	if( LiveMesh )
+		DS = FindRagdollDataset( LiveMesh->GetName() );
+	const FRagdollBoneDef* Defs = DS ? DS->Bones : GRagdollBoneDefs;
+	S.BoneDefs = Defs;
+	if( DS )
+		debugf( TEXT("RagdollPkg: BuildRagdoll %s dataset=%s"), C->GetName(), DS->DatasetName );
+
 	// Shared level world: one Box3D world holding the level BSP as a static
 	// triangle mesh plus every corpse's bodies. (Re)built when the level changes.
 	FRagdollLevelWorld& LW = GetRagdollLevelWorldFor( C->GetLevel() );
@@ -193,7 +206,7 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	// Ragdoll bodies.
 	for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
 	{
-		const FRagdollBoneDef& D = GRagdollBoneDefs[i];
+		const FRagdollBoneDef& D = Defs[i];
 		FVector Center = Origin + DrawScale * FVector( D.CX, D.CY, D.CZ );
 
 		b3BodyDef Bd = b3DefaultBodyDef();
@@ -240,20 +253,39 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 
 	// Joints. All ranges in radians. Spherical joints: cone half-angle about the
 	// vertical + twist range about the limb's own axis. Hinges: one-sided so
-	// knees/elbows flex the anatomically correct direction only.
-	AddJoint( S, BONE_Pelvis,    BONE_Spine,     FVector(  0.0f, 0.0f,  6.0f), DrawScale, { JK_Ball, 0.35f, -0.26f,  0.26f, 0.6f } );
-	AddJoint( S, BONE_Spine,     BONE_Neck,      FVector(  0.0f, 0.0f, 22.0f), DrawScale, { JK_Ball, 0.61f, -0.35f,  0.35f, 0.8f } );
-	AddJoint( S, BONE_Neck,      BONE_Head,      FVector(  0.0f, 0.0f, 30.0f), DrawScale, { JK_Ball, 0.44f, -0.26f,  0.26f, 0.4f } );
-	AddJoint( S, BONE_Spine,     BONE_UpperArmL, FVector(-13.0f, 6.0f, 24.0f), DrawScale, { JK_Ball, 1.40f, -0.44f,  0.44f, 0.7f } );
-	AddJoint( S, BONE_Spine,     BONE_UpperArmR, FVector( 13.0f, 6.0f, 24.0f), DrawScale, { JK_Ball, 1.40f, -0.44f,  0.44f, 0.7f } );
-	AddJoint( S, BONE_UpperArmL, BONE_ForearmL,  FVector(-13.0f, 8.0f, 12.0f), DrawScale, { JK_Hinge, -0.12f, 1.90f, 0.0f, 0.5f } );
-	AddJoint( S, BONE_UpperArmR, BONE_ForearmR,  FVector( 13.0f, 8.0f, 12.0f), DrawScale, { JK_Hinge, -0.12f, 1.90f, 0.0f, 0.5f } );
-	AddJoint( S, BONE_Pelvis,    BONE_ThighL,    FVector( -7.0f, 0.0f, -6.0f), DrawScale, { JK_Ball, 1.22f, -0.52f,  0.52f, 0.8f } );
-	AddJoint( S, BONE_Pelvis,    BONE_ThighR,    FVector(  7.0f, 0.0f, -6.0f), DrawScale, { JK_Ball, 1.22f, -0.52f,  0.52f, 0.8f } );
-	AddJoint( S, BONE_ThighL,    BONE_ShinL,     FVector( -7.0f, 0.0f,-22.0f), DrawScale, { JK_Hinge, -1.70f, 0.12f, 0.0f, 0.6f } );
-	AddJoint( S, BONE_ThighR,    BONE_ShinR,     FVector(  7.0f, 0.0f,-22.0f), DrawScale, { JK_Hinge, -1.70f, 0.12f, 0.0f, 0.6f } );
-	AddJoint( S, BONE_ShinL,     BONE_FootL,     FVector( -7.0f, 2.0f,-34.0f), DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
-	AddJoint( S, BONE_ShinR,     BONE_FootR,     FVector(  7.0f, 2.0f,-34.0f), DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
+	// knees/elbows flex the anatomically correct direction only. Anchor points
+	// come from the canonical skeleton or the per-model dataset.
+	static const FVector CanonicalAnchors[13] =
+	{
+		FVector(  0.0f, 0.0f,  6.0f), // pelvis-spine
+		FVector(  0.0f, 0.0f, 22.0f), // spine-neck
+		FVector(  0.0f, 0.0f, 30.0f), // neck-head
+		FVector(-13.0f, 6.0f, 24.0f), // spine-upperarmL
+		FVector( 13.0f, 6.0f, 24.0f), // spine-upperarmR
+		FVector(-13.0f, 8.0f, 12.0f), // upperarm-forearmL
+		FVector( 13.0f, 8.0f, 12.0f), // upperarm-forearmR
+		FVector( -7.0f, 0.0f, -6.0f), // pelvis-thighL
+		FVector(  7.0f, 0.0f, -6.0f), // pelvis-thighR
+		FVector( -7.0f, 0.0f,-22.0f), // thigh-shinL
+		FVector(  7.0f, 0.0f,-22.0f), // thigh-shinR
+		FVector( -7.0f, 2.0f,-34.0f), // shin-footL
+		FVector(  7.0f, 2.0f,-34.0f), // shin-footR
+	};
+	const FVector* Anch = DS ? DS->Anchors : CanonicalAnchors;
+
+	AddJoint( S, BONE_Pelvis,    BONE_Spine,     Defs, Anch[0], DrawScale, { JK_Ball, 0.35f, -0.26f,  0.26f, 0.6f } );
+	AddJoint( S, BONE_Spine,     BONE_Neck,      Defs, Anch[1], DrawScale, { JK_Ball, 0.61f, -0.35f,  0.35f, 0.8f } );
+	AddJoint( S, BONE_Neck,      BONE_Head,      Defs, Anch[2], DrawScale, { JK_Ball, 0.44f, -0.26f,  0.26f, 0.4f } );
+	AddJoint( S, BONE_Spine,     BONE_UpperArmL, Defs, Anch[3], DrawScale, { JK_Ball, 1.40f, -0.44f,  0.44f, 0.7f } );
+	AddJoint( S, BONE_Spine,     BONE_UpperArmR, Defs, Anch[4], DrawScale, { JK_Ball, 1.40f, -0.44f,  0.44f, 0.7f } );
+	AddJoint( S, BONE_UpperArmL, BONE_ForearmL,  Defs, Anch[5], DrawScale, { JK_Hinge, -0.12f, 1.90f, 0.0f, 0.5f } );
+	AddJoint( S, BONE_UpperArmR, BONE_ForearmR,  Defs, Anch[6], DrawScale, { JK_Hinge, -0.12f, 1.90f, 0.0f, 0.5f } );
+	AddJoint( S, BONE_Pelvis,    BONE_ThighL,    Defs, Anch[7], DrawScale, { JK_Ball, 1.22f, -0.52f,  0.52f, 0.8f } );
+	AddJoint( S, BONE_Pelvis,    BONE_ThighR,    Defs, Anch[8], DrawScale, { JK_Ball, 1.22f, -0.52f,  0.52f, 0.8f } );
+	AddJoint( S, BONE_ThighL,    BONE_ShinL,     Defs, Anch[9], DrawScale, { JK_Hinge, -1.70f, 0.12f, 0.0f, 0.6f } );
+	AddJoint( S, BONE_ThighR,    BONE_ShinR,     Defs, Anch[10], DrawScale, { JK_Hinge, -1.70f, 0.12f, 0.0f, 0.6f } );
+	AddJoint( S, BONE_ShinL,     BONE_FootL,     Defs, Anch[11], DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
+	AddJoint( S, BONE_ShinR,     BONE_FootR,     Defs, Anch[12], DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
 
 	// Lift bodies that spawned inside level geometry (ramp/stairs deaths) so the
 	// first step doesn't explode them. Must run before the first StepRagdoll.
@@ -352,11 +384,12 @@ static void SyncRagdollImpl( ARagdollCarcass* C )
 	// grow/shrink the cylinder so the corpse is actually hittable.
 	{
 		FLOAT DrawScale = ( C->DrawScale > 0.0f ) ? C->DrawScale : 1.0f;
+		const FRagdollBoneDef* Defs = S->BoneDefs ? S->BoneDefs : GRagdollBoneDefs;
 		FLOAT MaxR = 20.0f, MaxUp = 20.0f, MaxDown = 20.0f;
 		for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
 		{
 			b3WorldTransform BT = b3Body_GetTransform( S->Bodies[i] );
-			const FRagdollBoneDef& D = GRagdollBoneDefs[i];
+			const FRagdollBoneDef& D = Defs[i];
 			FLOAT E  = Max( Max( D.HX, D.HY ), D.HZ ) * DrawScale;
 			FLOAT dx = BT.p.x * RAGDOLL_M2U - NewLoc.X;
 			FLOAT dy = BT.p.y * RAGDOLL_M2U - NewLoc.Y;
