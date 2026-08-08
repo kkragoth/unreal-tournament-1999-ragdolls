@@ -53,6 +53,17 @@ enum ERagdollBone
 	BONE_FootR      = 13
 };
 
+// Real-mesh mode per-vertex smooth skin data (one entry per mesh vertex). Each
+// entry holds up to 3 bones with normalized weights summing to 1 (weight[0]
+// dominant, lower weights may be 0); Off is the bind-space offset (UU,
+// DrawScale=1) from the bone center, scaled by DrawScale in GetFrame.
+struct FRagdollVertexBind
+{
+	INT    Bone[3];
+	FVector Off[3];
+	FLOAT  Weight[3];
+};
+
 // Runtime state for one ragdolling carcass. Stored in a process-global map
 // keyed by the owning actor so URagdollMesh::GetFrame can reach it.
 struct FRagdollState
@@ -69,12 +80,8 @@ struct FRagdollState
 	b3Quat        RestRotations[RAGDOLL_BONE_COUNT];
 	const FRagdollBoneDef* BoneDefs;  // active skeleton (dataset or canonical)
 
-	// Real-mesh mode: per-output-vertex bone assignment (one entry per mesh
-	// vertex). VertOffsets holds each vertex's actor-local offset (UU, DrawScale
-	// applied) from its assigned bone's rest center, so GetFrame can rigidly
-	// attach the player's mesh to the Box3D bodies. Empty in box-mannequin mode.
-	TArray<INT>     VertBones;
-	TArray<FVector> VertOffsets;
+	// Per-vertex smooth skin data (indexed by mesh vertex); empty in box mode.
+	TArray<FRagdollVertexBind> VertBinds;
 };
 
 // Shared level geometry world: ONE Box3D world per level that holds the level
@@ -133,8 +140,9 @@ struct FRagdollDatasetEntry
 	const FMeshMaterial* Materials;
 	const FRagdollBoneDef* Bones;    // 14 derived defs
 	const FVector*       Anchors;    // 13 joint anchors (BuildRagdollImpl order)
-	const INT*           VertBones;  // per-vertex bone assignment
-	const FVector*       VertOffsets;// per-vertex bind offsets (DrawScale=1)
+	const INT*           BindBones;  // NumVerts*3, index 0 is dominant
+	const FVector*       BindOffsets;// NumVerts*3 (UU, DrawScale=1)
+	const FLOAT*         BindWeights;// NumVerts*3, sum to 1 per vertex
 };
 
 // Look up the dataset for a live player mesh name; NULL when none (the caller

@@ -198,16 +198,20 @@ URagdollMesh* CreatePlayerRagdollMesh( ARagdollCarcass* Carcass, FRagdollState& 
 	if( NumVerts <= 0 || DS->NumFaces <= 0 || DS->NumWedges <= 0 || DS->NumMats <= 0 )
 		return NULL;
 
-	// Per-vertex bone assignment for GetFrame (bind space, DrawScale=1; GetFrame
-	// scales the offsets by the actor DrawScale when emitting).
-	S.VertBones.Empty( NumVerts );
-	S.VertOffsets.Empty( NumVerts );
-	S.VertBones.Add( NumVerts );
-	S.VertOffsets.Add( NumVerts );
+	// Per-vertex smooth skinning for GetFrame (bind space, DrawScale=1; GetFrame
+	// scales the offsets by the actor DrawScale when emitting). Each vertex has
+	// up to 3 weighted bones (weight[0] dominant, weights sum to 1).
+	S.VertBinds.Empty( NumVerts );
+	S.VertBinds.Add( NumVerts );
 	for( INT k=0; k<NumVerts; k++ )
 	{
-		S.VertBones( k )   = DS->VertBones[k];
-		S.VertOffsets( k ) = DS->VertOffsets[k];
+		FRagdollVertexBind& B = S.VertBinds( k );
+		for( INT w=0; w<3; w++ )
+		{
+			B.Bone[w]   = DS->BindBones[ k*3 + w ];
+			B.Off[w]    = DS->BindOffsets[ k*3 + w ];
+			B.Weight[w] = DS->BindWeights[ k*3 + w ];
+		}
 	}
 
 	URagdollMesh* Mesh = ConstructObject<URagdollMesh>( URagdollMesh::StaticClass(), UObject::GetTransientPackage(), NAME_None, RF_Public );
@@ -297,11 +301,11 @@ void URagdollMesh::GetFrame( FVector* Verts, INT Size, FCoords Coords, AActor* O
 	FVector FallbackOrigin = Owner ? Owner->Location : FVector( 0, 0, 0 );
 
 	INT Num = FrameVerts;
-	// Real-mesh mode: per-vertex bone data captured at build time (indexes the
-	// Box3D bodies directly). Box-mannequin mode only when the vert count is
-	// exactly the 14-bone box layout. Anything else uses the captured fallback
-	// pose so the mesh never indexes Bodies[] out of bounds.
-	UBOOL bRealMesh = S && S->bBuilt && S->VertBones.Num() == FrameVerts && FrameVerts != RAGDOLL_BONE_COUNT * VertsPerBox;
+	// Real-mesh mode: per-vertex smooth skin data (indexes the Box3D bodies
+	// directly). Box-mannequin mode only when the vert count is exactly the
+	// 14-bone box layout. Anything else uses the captured fallback pose so the
+	// mesh never indexes Bodies[] out of bounds.
+	UBOOL bRealMesh = S && S->bBuilt && S->VertBinds.Num() == FrameVerts && FrameVerts != RAGDOLL_BONE_COUNT * VertsPerBox;
 	UBOOL bBoxMesh  = S && S->bBuilt && FrameVerts == RAGDOLL_BONE_COUNT * VertsPerBox;
 	if( !bRealMesh && !bBoxMesh && LODRequest > 0 && LODRequest < Num )
 		Num = LODRequest;
@@ -309,20 +313,25 @@ void URagdollMesh::GetFrame( FVector* Verts, INT Size, FCoords Coords, AActor* O
 	if( S && S->bBuilt && !S->bFrameLogged )
 	{
 		S->bFrameLogged = true;
-		debugf( TEXT("RagdollMesh: GetFrame first owner=%s FrameVerts=%i VertBones=%i real=%i box=%i LOD=%i"),
-			Owner ? Owner->GetName() : TEXT("none"), FrameVerts, S->VertBones.Num(), bRealMesh, bBoxMesh, LODRequest );
+		debugf( TEXT("RagdollMesh: GetFrame first owner=%s FrameVerts=%i VertBinds=%i real=%i box=%i LOD=%i"),
+			Owner ? Owner->GetName() : TEXT("none"), FrameVerts, S->VertBinds.Num(), bRealMesh, bBoxMesh, LODRequest );
 		if( bRealMesh )
 		{
 			for( INT d=0; d<8 && d<Num; d++ )
 			{
-				INT Bone = S->VertBones(d);
-				FVector Off = S->VertOffsets(d);
-				b3WorldTransform T = b3Body_GetTransform( S->Bodies[Bone] );
-				FVector Center( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
-				b3Vec3 Rot = b3RotateVector( T.q, { Off.X * DrawScale, Off.Y * DrawScale, Off.Z * DrawScale } );
-				FVector Pos = Center + FVector( Rot.x, Rot.y, Rot.z );
-				debugf( TEXT("RagdollMesh: realvert[%i] bone=%i off=(%.1f,%.1f,%.1f) world=(%.1f,%.1f,%.1f) ownerloc=(%.1f,%.1f,%.1f)"),
-					d, Bone, Off.X, Off.Y, Off.Z, Pos.X, Pos.Y, Pos.Z,
+				const FRagdollVertexBind& B = S->VertBinds(d);
+				FVector Pos( 0, 0, 0 );
+				for( INT k=0; k<3; k++ )
+				{
+					if( B.Weight[k] <= 0.0f )
+						break;
+					b3WorldTransform T = b3Body_GetTransform( S->Bodies[B.Bone[k]] );
+					FVector Center( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
+					b3Vec3 Rot = b3RotateVector( T.q, { B.Off[k].X * DrawScale, B.Off[k].Y * DrawScale, B.Off[k].Z * DrawScale } );
+					Pos += ( Center + FVector( Rot.x, Rot.y, Rot.z ) ) * B.Weight[k];
+				}
+				debugf( TEXT("RagdollMesh: realvert[%i] bone=%i w=%.2f world=(%.1f,%.1f,%.1f) ownerloc=(%.1f,%.1f,%.1f)"),
+					d, B.Bone[0], B.Weight[0], Pos.X, Pos.Y, Pos.Z,
 					Owner ? Owner->Location.X : 0, Owner ? Owner->Location.Y : 0, Owner ? Owner->Location.Z : 0 );
 			}
 		}
@@ -381,16 +390,23 @@ void URagdollMesh::GetFrame( FVector* Verts, INT Size, FCoords Coords, AActor* O
 		// bone's current world transform.
 		if( bRealMesh )
 		{
-			// Real-mesh mode: each vertex is rigidly attached to its assigned
-			// bone. The bone's current world transform places it; the stored
-			// actor-local offset (bind space, DrawScale applied here) is rotated
-			// by the bone's current world rotation.
-			INT Bone = S->VertBones(i);
-			FVector Off = S->VertOffsets(i);
-			b3WorldTransform T = b3Body_GetTransform( S->Bodies[Bone] );
-			FVector Center( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
-			b3Vec3 Rot = b3RotateVector( T.q, { Off.X * DrawScale, Off.Y * DrawScale, Off.Z * DrawScale } );
-			Pos = Center + FVector( Rot.x, Rot.y, Rot.z );
+			// Real-mesh mode: smooth multi-bone skinning. Each vertex blends up
+			// to 3 weighted bone transforms (the weights were computed offline so
+			// joint-region verts transition smoothly between adjacent bones
+			// instead of tearing when the limbs separate).
+			const FRagdollVertexBind& B = S->VertBinds(i);
+			Pos = FVector( 0, 0, 0 );
+			for( INT k=0; k<3; k++ )
+			{
+				if( B.Weight[k] <= 0.0f )
+					break;
+				INT Bone = B.Bone[k];
+				FVector Off = B.Off[k];
+				b3WorldTransform T = b3Body_GetTransform( S->Bodies[Bone] );
+				FVector Center( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
+				b3Vec3 Rot = b3RotateVector( T.q, { Off.X * DrawScale, Off.Y * DrawScale, Off.Z * DrawScale } );
+				Pos += ( Center + FVector( Rot.x, Rot.y, Rot.z ) ) * B.Weight[k];
+			}
 		}
 		else if( bBoxMesh )
 		{
@@ -512,7 +528,7 @@ void URagdollMesh::GetFrame( FVector* Verts, INT Size, FCoords Coords, AActor* O
 			{
 				INT i = ( s * ( Num - 1 ) ) / 11;
 				FVector V = *(FVector*)( (BYTE*)Verts + (ptrdiff_t)i * Size );
-				INT Bone = S->VertBones(i);
+				INT Bone = S->VertBinds.IsValidIndex(i) ? S->VertBinds(i).Bone[0] : -1;
 				Sam += FString::Printf( TEXT("[%i@%i](%.0f,%.0f,%.0f)"), i, Bone, V.X, V.Y, V.Z );
 			}
 			debugf( TEXT("RagdollMesh: RealSample %s"), *Sam );

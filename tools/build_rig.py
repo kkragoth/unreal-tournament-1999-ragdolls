@@ -132,14 +132,7 @@ def derive_bones(verts):
     # shin/foot (the classic hand->leg triangle tear). Rebind every vert on the
     # arm column (down to the feet) to its side's upper-arm/forearm bone.
     arms_wide = [v for v in verts if abs(v[0]) > arm_thr and foot - 1.0 <= v[2] < shoulder_top]
-    uset = set(v for v in arms_wide if v[2] >= elbow)
-    fset = set(v for v in arms_wide if v[2] < elbow)
-    arm_override = {}
-    for i, v in enumerate(verts):
-        if v in uset:
-            arm_override[i] = 4 if v[0] < 0 else 5
-        elif v in fset:
-            arm_override[i] = 6 if v[0] < 0 else 7
+    arm_idx = {i for i, v in enumerate(verts) if v in arms_wide}
 
     def cen(grp):
         if not grp:
@@ -228,7 +221,7 @@ def derive_bones(verts):
         "n_spine": len(spine), "n_arm": len(arms), "n_leg": len(legs),
         "n_upper": len(upper), "n_fore": len(fore),
         "n_thigh": len(thigh), "n_shin": len(shin), "n_foot": len(foot_v),
-        "upper_c": ua, "fore_c": fa, "arm_override": arm_override,
+        "upper_c": ua, "fore_c": fa, "arm_idx": arm_idx,
     }
     return centers, halves, report
 
@@ -265,27 +258,44 @@ def box_dist(p, c, h):
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 
 
-def bind_verts(verts, centers, halves, override=None):
-    """Nearest-bone-box assignment (override: {vert_idx: forced bone} wins for
-    arm-region verts, whose boxes the long limbs must keep). Returns (indices,
-    offsets)."""
-    bones = [0] * len(verts)
-    offs = [None] * len(verts)
+def bind_verts(verts, centers, halves, arm_idx=None):
+    """Smooth multi-bone skinning weights. Returns per-vertex lists of up to 3
+    (bone, weight, offset) entries (weight sum = 1, weight[0] dominant).
+
+    Weights are inverse box-distance over the 3 nearest bones, so joints blend
+    smoothly (verts at a knee transition between thigh and shin instead of
+    tearing) while the core of each limb stays near-rigid to its bone (sharp
+    power falloff). Vertices on the arm column (hands reach the ankles in the
+    viewer pose) EXCLUDE the leg bones from the candidate set — otherwise the
+    hands bind to the shin/foot and the arms tear off when the limbs separate.
+    """
+    LEG = {8, 9, 10, 11, 12, 13}
+    binds = []
     for i, p in enumerate(verts):
-        if override and i in override:
-            best = override[i]
-        else:
-            best = 0
-            best_d = 1e30
-            for b, c in enumerate(centers):
-                d = box_dist(p, c, halves[b])
-                if d < best_d:
-                    best_d, best = d, b
-        bones[i] = best
-        offs[i] = (p[0] - centers[best][0],
-                   p[1] - centers[best][1],
-                   p[2] - centers[best][2])
-    return bones, offs
+        cand = range(14) if not (arm_idx and i in arm_idx) else [b for b in range(14) if b not in LEG]
+        ds = sorted((box_dist(p, centers[b], halves[b]), b) for b in cand)
+        top = ds[:3]
+        inv = [1.0 / (d + 0.1) ** 3 for d, _ in top]
+        wsum = sum(inv)
+        entry = []
+        for (_, b), w in zip(top, inv):
+            c = centers[b]
+            entry.append((b, w / wsum, (p[0] - c[0], p[1] - c[1], p[2] - c[2])))
+        binds.append(entry)
+    return binds
+
+
+def flatten_binds(binds, n):
+    """Flatten per-vertex binds into dense NumVerts*3 arrays for the header."""
+    bones, offs, weights = [], [], []
+    for entry in binds:
+        for k in range(3):
+            if k < len(entry):
+                b, w, o = entry[k]
+                bones.append(b); weights.append(w); offs.append(o)
+            else:
+                bones.append(0); weights.append(0.0); offs.append((0.0, 0.0, 0.0))
+    return bones, offs, weights
 
 
 def verify(verts, centers, halves, bones, offs, model):
@@ -383,12 +393,14 @@ def build_rig(pkg, sel_name, live_name):
     bind = [(v[0] - px, v[1] - py, v[2] - pz) for v in bind]
     centers = [(c[0] - px, c[1] - py, c[2] - pz) for c in centers]
 
-    # 4) Anchors + bind.
+    # 4) Anchors + bind (smooth multi-bone weights).
     anchors = compute_anchors(centers)
-    bones, offs = bind_verts(bind, centers, halves, rep["arm_override"])
+    binds = bind_verts(bind, centers, halves, rep["arm_idx"])
+    bind_bones, bind_offsets, bind_weights = flatten_binds(binds, len(bind))
 
-    # 5) Assertions.
-    per_bone = verify(bind, centers, halves, bones, offs, sel_name)
+    # 5) Assertions (dominant bone per vertex, for the no-starvation/nearest check).
+    per_bone = verify(bind, centers, halves,
+                      [b[0][0] for b in binds], [b[0][2] for b in binds], sel_name)
 
     print(f"  yaw={yaw:+d} mirror={mir:.2f} legSplit={split0:.2f} (n={n_low}) H={rep['H']:.1f} "
           f"n_head={rep['n_head']} n_neck={rep['n_neck']} n_pelvis={rep['n_pelvis']} "
@@ -415,8 +427,9 @@ def build_rig(pkg, sel_name, live_name):
         "centers": centers,
         "halves": halves,
         "anchors": anchors,
-        "bones": bones,
-        "offsets": offs,
+        "bind_bones": bind_bones,
+        "bind_offsets": bind_offsets,
+        "bind_weights": bind_weights,
         "per_bone": per_bone,
         "yaw": yaw,
         "mirror": mir,
@@ -524,6 +537,13 @@ def emit_header(models, out_path):
         out.append("};")
         out.append("")
 
+    def floats(name, values, per):
+        out.append(f"static const FLOAT {name}[{len(values)}] = {{")
+        for i in range(0, len(values), per):
+            out.append("\t" + ", ".join(f"{x:.4f}" for x in values[i:i + per]) + ",")
+        out.append("};")
+        out.append("")
+
     for d in models:
         tag = d["sel_name"]
         v3(f"G{tag}_Verts", d["verts"])
@@ -532,8 +552,9 @@ def emit_header(models, out_path):
         mats(f"G{tag}_Materials", d["materials"])
         bones(f"G{tag}_Bones", d["centers"], d["halves"])
         v3(f"G{tag}_Anchors", d["anchors"])
-        ints(f"G{tag}_VertBones", d["bones"], 14)
-        v3(f"G{tag}_VertOffsets", d["offsets"])
+        ints(f"G{tag}_BindBones", d["bind_bones"], 12)
+        v3(f"G{tag}_BindOffsets", d["bind_offsets"])
+        floats(f"G{tag}_BindWeights", d["bind_weights"], 12)
 
     out.append("// Model lookup table: live pawn mesh name -> dataset.")
     out.append("static const FRagdollDatasetEntry GRagdollDatasetTable[] = {")
@@ -543,7 +564,8 @@ def emit_header(models, out_path):
             f'\t{{ TEXT("{d["live_name"]}"), TEXT("{tag}"), {len(d["verts"])}, '
             f'{len(d["faces"])}, {len(d["wedges"])}, {len(d["materials"])}, '
             f'G{tag}_Verts, G{tag}_Faces, G{tag}_Wedges, G{tag}_Materials, '
-            f'G{tag}_Bones, G{tag}_Anchors, G{tag}_VertBones, G{tag}_VertOffsets }},')
+            f'G{tag}_Bones, G{tag}_Anchors, '
+            f'G{tag}_BindBones, G{tag}_BindOffsets, G{tag}_BindWeights }},')
     out.append("};")
     out.append(f"static const INT GRagdollDatasetCount = {len(models)};")
     out.append("")
