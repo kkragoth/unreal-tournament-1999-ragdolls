@@ -28,7 +28,11 @@ import sys
 
 from extract_mesh import UTPackage, parse_lod_mesh, find_meshes, mesh_to_world
 
-# Live player mesh name -> Selection dataset name (face counts match per pair).
+# Live player mesh name -> Selection viewer mesh (arms-down bind pose). UT
+# player meshes have NO pose with hip-length arms (every standing frame hangs
+# the hands down by the ankles), so we bind the Selection viewer mesh and
+# handle the hand/ankle contact explicitly: arm<->leg faces are dropped and
+# the foot/ankle region is bound rigidly to the foot bones. (live, selection)
 MODEL_MAP = [
     ("Commando", "SelectionMale1"),
     ("Soldier", "SelectionMale2"),
@@ -122,6 +126,12 @@ def derive_bones(verts):
     shin = [v for v in legs if ankle <= v[2] < knee]
     foot_v = [v for v in legs if v[2] < ankle]
 
+    # Feet are skipped from the ragdoll (a separate foot body scrambles the
+    # ankle). Collect their indices so bind_verts can bind them rigidly to the
+    # shin of their side.
+    foot_set = set(foot_v)
+    foot_idx = {i for i, v in enumerate(verts) if v in foot_set}
+
     arms = [v for v in verts if abs(v[0]) > arm_thr and hand_bot <= v[2] < shoulder_top]
     upper = [v for v in arms if v[2] >= elbow]
     fore = [v for v in arms if v[2] < elbow]
@@ -213,15 +223,38 @@ def derive_bones(verts):
         (1.4, 1.4, hz(0.21)), (1.4, 1.4, hz(0.21)),   # Forearms (reach the hands)
         (3.0, 3.0, hz(0.09)), (3.0, 3.0, hz(0.09)),   # Thighs
         (2.4, 2.4, hz(0.12)), (2.4, 2.4, hz(0.12)),   # Shins
-        (2.0, 4.0, hz(0.035)), (2.0, 4.0, hz(0.035)), # Feet
+        (2.0, 3.0, hz(0.03)), (2.0, 3.0, hz(0.03)),   # Feet (unused)
     ]
+
+    # Feet are skipped from the ragdoll and bound rigidly to the shins, so each
+    # shin box must span thigh-bottom -> foot-bottom or the feet clip the floor
+    # (the shin centroid is re-centered on that span).
+    foot_bottom = mn[2]
+    for b in (10, 11):
+        knee_top = centers[8][2] - halves[8][2]   # thigh box bottom (same side)
+        new_cz = (knee_top + foot_bottom) / 2.0
+        new_hz = (knee_top - foot_bottom) / 2.0 + 1.0
+        centers[b] = (centers[b][0], centers[b][1], new_cz)
+        halves[b] = (halves[b][0], halves[b][1], new_hz)
+    # Forearm+hand verts = the arm column BELOW the elbow (the hands hang down
+    # to the ankles in the viewer pose). These are the verts the mesh-fold
+    # rotates up about the elbow so the hands leave the ankles.
+    fore_idx = {i for i, v in enumerate(verts) if abs(v[0]) > arm_thr
+                and v[2] < elbow}
+    # Leg verts = central (|x|<=arm_thr) below the pelvis: thigh+shin+foot.
+    leg_idx = {i for i, v in enumerate(verts) if v in legs}
+    # Arm column mean Y per side (elbow pivot y). Mirror-average for symmetry.
+    ayL = st.mean(v[1] for v in arms_wide if v[0] < 0)
+    ayR = st.mean(v[1] for v in arms_wide if v[0] > 0)
+    arm_y = (ayL + ayR) / 2.0
     report = {
         "H": H, "foot": foot, "arm_thr": arm_thr,
         "n_head": len(head), "n_neck": len(neck), "n_pelvis": len(pelvis),
         "n_spine": len(spine), "n_arm": len(arms), "n_leg": len(legs),
         "n_upper": len(upper), "n_fore": len(fore),
         "n_thigh": len(thigh), "n_shin": len(shin), "n_foot": len(foot_v),
-        "upper_c": ua, "fore_c": fa, "arm_idx": arm_idx,
+        "upper_c": ua, "fore_c": fa, "arm_idx": arm_idx, "foot_idx": foot_idx,
+        "fore_idx": fore_idx, "leg_idx": leg_idx, "elbow": elbow, "arm_y": arm_y,
     }
     return centers, halves, report
 
@@ -258,30 +291,61 @@ def box_dist(p, c, h):
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 
 
-def bind_verts(verts, centers, halves, arm_idx=None):
-    """Smooth multi-bone skinning weights. Returns per-vertex lists of up to 3
-    (bone, weight, offset) entries (weight sum = 1, weight[0] dominant).
+def fold_forearms(verts, centers, pivot_y, elbow_z, fore_idx, angle_deg):
+    """Fold the forearm+hand verts up about the elbow so the hands leave the
+    ankles (the root cause of every lower-body binding problem). Only the MESH
+    verts move; the physics skeleton is unchanged, so the elbows stay straight
+    (no hinge/limit changes, no joint pop at spawn) and all previous
+    interpenetration checks still hold. The folded hands render attached to
+    the (straight) forearm bones via the recomputed bind offsets.
 
-    Weights are inverse box-distance over the 3 nearest bones, so joints blend
-    smoothly (verts at a knee transition between thigh and shin instead of
-    tearing) while the core of each limb stays near-rigid to its bone (sharp
-    power falloff). Vertices on the arm column (hands reach the ankles in the
-    viewer pose) EXCLUDE the leg bones from the candidate set — otherwise the
-    hands bind to the shin/foot and the arms tear off when the limbs separate.
+    Rotation is about the X axis (medial-lateral) through each side's elbow,
+    which swings the hand from pointing down to pointing up; the fold angle is
+    the angular travel from the hanging arm. At 180 the hands point straight
+    up beside the head (front-agnostic); slightly less folds them forward.
+    pivot_y/elbow_z are in the same frame as verts (pelvis translated to
+    origin); the per-side X pivot is the elbow line at abs(centers[4][0]).
+    """
+    arm_x = abs(centers[4][0])
+    a = math.radians(angle_deg)
+    ca, sa = math.cos(a), math.sin(a)
+    out = list(verts)
+    for i in fore_idx:
+        s = -1.0 if verts[i][0] < 0 else 1.0
+        px, py, pz = s * arm_x, pivot_y, elbow_z
+        dx, dy, dz = verts[i][0] - px, verts[i][1] - py, verts[i][2] - pz
+        dy2 = dy * ca - dz * sa
+        dz2 = dy * sa + dz * ca
+        out[i] = (verts[i][0], py + dy2, pz + dz2)
+    return out
+
+
+def bind_verts(verts, centers, halves, arm_idx=None, foot_idx=None, fore_idx=None):
+    """Rigid 1-bone binding. Each vertex belongs to exactly ONE bone (weight 1)
+    so the mesh shows clean single-color regions — the smooth multi-bone
+    blending produced noisy 3-color overlap zones in the lower body.
+
+    Arm and leg bones are mutually exclusive candidate groups so the hands
+    (which hang against the legs in the viewer pose) never attach to the legs
+    and the thighs never attach to the arms. Foot verts are bound rigidly to
+    the shin of their side (feet are skipped from the ragdoll). Forearm+hand
+    verts (folded up about the elbow) are bound rigidly to the forearm bone of
+    their side — nearest-box would lose them to the head/neck once folded.
     """
     LEG = {8, 9, 10, 11, 12, 13}
+    CORE = {0, 1, 2, 3, 8, 9, 10, 11}   # torso+head+thigh+shin (no feet, no arms)
     binds = []
     for i, p in enumerate(verts):
-        cand = range(14) if not (arm_idx and i in arm_idx) else [b for b in range(14) if b not in LEG]
-        ds = sorted((box_dist(p, centers[b], halves[b]), b) for b in cand)
-        top = ds[:3]
-        inv = [1.0 / (d + 0.1) ** 3 for d, _ in top]
-        wsum = sum(inv)
-        entry = []
-        for (_, b), w in zip(top, inv):
-            c = centers[b]
-            entry.append((b, w / wsum, (p[0] - c[0], p[1] - c[1], p[2] - c[2])))
-        binds.append(entry)
+        if foot_idx and i in foot_idx:
+            bone = 10 if p[0] < 0 else 11
+        elif fore_idx and i in fore_idx:
+            bone = 6 if p[0] < 0 else 7
+        elif arm_idx and i in arm_idx:
+            bone = min(range(14), key=lambda b: box_dist(p, centers[b], halves[b]) if b not in LEG else 1e30)
+        else:
+            bone = min(CORE, key=lambda b: box_dist(p, centers[b], halves[b]))
+        c = centers[bone]
+        binds.append([(bone, 1.0, (p[0] - c[0], p[1] - c[1], p[2] - c[2]))])
     return binds
 
 
@@ -315,7 +379,8 @@ def verify(verts, centers, halves, bones, offs, model):
         per_bone[b] += 1
         mean_off[b] += math.sqrt(offs[i][0] ** 2 + offs[i][1] ** 2 + offs[i][2] ** 2)
     print(f"  per-bone verts: {per_bone}")
-    for b in range(14):
+    # Feet are skipped from the ragdoll (bones 12/13 never get verts by design).
+    for b in range(12):
         n = max(per_bone[b], 1)
         mean_off[b] /= n
         diag = 2.0 * math.sqrt(halves[b][0] ** 2 + halves[b][1] ** 2 + halves[b][2] ** 2)
@@ -348,8 +413,8 @@ def verify(verts, centers, halves, bones, offs, model):
     return per_bone
 
 
-def build_rig(pkg, sel_name, live_name):
-    """Full pipeline for one Selection model. Returns dict of arrays."""
+def build_rig(pkg, sel_name, live_name=None, frame=0, fold_deg=0):
+    """Full pipeline for one Selection viewer mesh (bind frame 0 by default)."""
     idx = None
     for i, e, cn in find_meshes(pkg):
         if pkg.name(e.object_name) == sel_name and cn == "Core.LodMesh":
@@ -358,11 +423,13 @@ def build_rig(pkg, sel_name, live_name):
     if idx is None:
         raise RuntimeError(f"mesh {sel_name} not found")
     m = parse_lod_mesh(pkg, idx)
+    if frame < 0 or frame >= m.anim_frames:
+        raise RuntimeError(f"{sel_name}: frame {frame} out of range ({m.anim_frames})")
 
     # Derive from the wedge-referenced verts ONLY (the first SpecialVerts per
-    # frame are invisible attachment points, e.g. female back straps at y=40).
+    # frame are invisible attachment points).
     used = sorted({w[0] + m.special_verts for w in m.wedges})
-    world = [mesh_to_world(m.verts[k], m) for k in used]
+    world = [mesh_to_world(m.verts[frame * m.frame_verts + k], m) for k in used]
     remap = {old: new for new, old in enumerate(used)}
 
     # 1) Center on the body centroid, then yaw-correct to bind space. The
@@ -393,14 +460,26 @@ def build_rig(pkg, sel_name, live_name):
     bind = [(v[0] - px, v[1] - py, v[2] - pz) for v in bind]
     centers = [(c[0] - px, c[1] - py, c[2] - pz) for c in centers]
 
-    # 4) Anchors + bind (smooth multi-bone weights).
+    # 4) Anchors + bind (smooth multi-bone weights; feet rigid on the shin).
     anchors = compute_anchors(centers)
-    binds = bind_verts(bind, centers, halves, rep["arm_idx"])
-    bind_bones, bind_offsets, bind_weights = flatten_binds(binds, len(bind))
 
-    # 5) Assertions (dominant bone per vertex, for the no-starvation/nearest check).
+    # 4b) Verify the PHYSICS skeleton on the pre-fold verts (the fold only
+    #     repositions mesh verts; bones/boxes/anchors are unchanged, so the
+    #     "verts near center" sanity check is only meaningful before the fold).
+    binds = bind_verts(bind, centers, halves, rep["arm_idx"], rep["foot_idx"],
+                       rep["fore_idx"])
     per_bone = verify(bind, centers, halves,
                       [b[0][0] for b in binds], [b[0][2] for b in binds], sel_name)
+
+    # 4c) Fold the forearm+hand verts up about the elbow so the hands leave the
+    #     ankles. Only mesh positions change (skeleton stays straight). Then
+    #     rebind so the offsets reflect the folded pose.
+    if fold_deg > 0:
+        bind = fold_forearms(bind, centers, rep["arm_y"] - py,
+                             rep["elbow"] - pz, rep["fore_idx"], fold_deg)
+    binds = bind_verts(bind, centers, halves, rep["arm_idx"], rep["foot_idx"],
+                       rep["fore_idx"])
+    bind_bones, bind_offsets, bind_weights = flatten_binds(binds, len(bind))
 
     print(f"  yaw={yaw:+d} mirror={mir:.2f} legSplit={split0:.2f} (n={n_low}) H={rep['H']:.1f} "
           f"n_head={rep['n_head']} n_neck={rep['n_neck']} n_pelvis={rep['n_pelvis']} "
@@ -417,11 +496,19 @@ def build_rig(pkg, sel_name, live_name):
     # SpecialVerts that are baked into the raw iVertex values).
     wedges = [(remap[w[0] + m.special_verts], w[1], w[2]) for w in m.wedges]
 
+    # Keep the mesh COMPLETE. Earlier iterations tried to drop "arm-leg bridge"
+    # faces so they wouldn't stretch when the ragdoll separates the limbs, but
+    # the classification over-matched: it deleted ~10% of the whole mesh along
+    # the arm-torso seam (the arm hangs against the body in the bind pose, so
+    # those shared triangles ARE the character's skin). The raw mesh is closed
+    # and correct as-is, so we export it untouched.
+    faces = list(m.faces)
+
     return {
-        "live_name": live_name,
+        "live_name": live_name or sel_name,
         "sel_name": sel_name,
         "verts": bind,
-        "faces": m.faces,
+        "faces": faces,
         "wedges": wedges,
         "materials": m.materials,
         "centers": centers,
@@ -462,6 +549,80 @@ def _enforce_clearance(centers, halves):
         centers[arm_bone] = (sign * max(ax, need), centers[arm_bone][1],
                              centers[arm_bone][2])
     return centers
+
+
+def _is_arm_leg_face(fa, wedges, fore_idx, leg_idx):
+    """True if a face bridges an ARM/forearm+hand vert to a LEG/foot vert.
+
+    The viewer pose hangs the hands down against the legs/feet, so the mesh
+    contains triangles that connect forearm+hand verts to thigh/shin/foot verts.
+    Those stretch into long spikes the moment the ragdoll separates the limbs,
+    so they are dropped. Membership is by the derived vertex classification
+    (fore_idx vs leg_idx), NOT by spatial bands: the old x/z threshold check
+    misread foot-bottom verts (|x| up to ~12, z<-25) as "arm verts" and deleted
+    the feet's own bottom faces, leaving holes in the soles.
+    """
+    ws = {wedges[fa[k]][0] for k in range(3)}
+    fore = set(fore_idx or ())
+    leg = set(leg_idx or ())
+    return bool(ws & fore) and bool(ws & leg)
+
+
+def _add_foot_boxes(verts, wedges, faces, bind_bones, bind_offsets, bind_weights,
+                    centers, halves, foot_bot):
+    """Rebuild each foot as a closed box bound rigidly to its shin bone.
+
+    The Selection viewer feet are so low-poly that their "soles" are SHARED
+    triangles with the hands that hang to the floor in the bind pose. Those
+    bridges must be dropped (they'd spike when the ragdoll separates the
+    limbs), which leaves the feet open at the bottom. Feet are skipped from
+    the ragdoll and rigidly bound to the shins, so a clean procedural box per
+    foot guarantees closed, intact feet. Each box corner binds to the shin of
+    its side (bone 10=L, 11=R) with an offset.
+
+    The box is derived from the SHIN bone (center x/y, half extents) and sits
+    on the mesh floor, so both feet are the same size and symmetric. The source
+    foot verts are too few/scattered to define a sane footprint (e.g. the right
+    foot's leg verts can span 22 UU), which made the old bbox-based box absurdly
+    long and asymmetric.
+    """
+    for side in (-1.0, 1.0):
+        bone = 10 if side < 0 else 11
+        bc = centers[bone]
+        hx = halves[bone][0] * 0.85
+        hy = halves[bone][1] * 0.85
+        # Foot is short: a third of the shin height, sitting on the floor.
+        hz = max(halves[bone][2] * 0.30, 2.5)
+        cx = bc[0]
+        cy = bc[1]
+        cz = foot_bot + hz
+        base_v = len(verts)
+        base_w = len(wedges)
+        corners = []
+        for sx in (-1.0, 1.0):
+            for sy in (-1.0, 1.0):
+                for sz in (-1.0, 1.0):
+                    corners.append((cx + hx * sx, cy + hy * sy, cz + hz * sz))
+        for ci, c in enumerate(corners):
+            verts.append(c)
+            wedges.append((base_v + ci, 0.0, 0.0))
+            for k in range(3):
+                bind_bones.append(bone)
+                bind_weights.append(1.0 if k == 0 else 0.0)
+                bind_offsets.append((c[0] - bc[0], c[1] - bc[1], c[2] - bc[2]))
+        # 12 tris for the 6 box faces. Quads per face with corner indices.
+        quads = [
+            (0, 1, 3, 2),   # -x
+            (4, 6, 7, 5),   # +x
+            (0, 2, 6, 4),   # -y
+            (1, 5, 7, 3),   # +y
+            (2, 3, 7, 6),   # -z  (bottom, facing down)
+            (0, 4, 5, 1),   # +z
+        ]
+        for q in quads:
+            faces.append((base_w + q[0], base_w + q[1], base_w + q[2], 0))
+            faces.append((base_w + q[0], base_w + q[2], base_w + q[3], 0))
+    return verts, wedges, faces, bind_bones, bind_offsets, bind_weights
 
 
 def _pick_facing(Wa, ya, Wb):
@@ -579,6 +740,7 @@ def emit_obj_overlay(d, obj_dir):
     base = d["sel_name"]
     mesh_path = os.path.join(obj_dir, f"{base}_mesh.obj")
     skel_path = os.path.join(obj_dir, f"{base}_skeleton.obj")
+    bones_path = os.path.join(obj_dir, f"{base}_mesh_bones.obj")
 
     # Mesh: one position per wedge (matches export_obj indexing).
     with open(mesh_path, "w") as f:
@@ -589,12 +751,12 @@ def emit_obj_overlay(d, obj_dir):
         for fa in d["faces"]:
             f.write(f"f {fa[0]+1} {fa[1]+1} {fa[2]+1}\n")
 
-    # Skeleton: each bone is an OBJ group (o Bone_i) of 8 box verts + 6 quads.
+    # Skeleton: each bone is an OBJ group (o Skel_i) of 8 box verts + 6 quads.
     with open(skel_path, "w") as f:
-        f.write(f"# {base} derived skeleton (14 boxes)\n")
-        for b, c in enumerate(d["centers"]):
+        f.write(f"# {base} derived skeleton (12 boxes; feet skipped)\n")
+        for b, c in enumerate(d["centers"][:12]):
             h = d["halves"][b]
-            f.write(f"o Bone_{b}_{BONE_NAMES[b]}\n")
+            f.write(f"o Skel_{b}_{BONE_NAMES[b]}\n")
             for cx0 in (-1, 1):
                 for cy0 in (-1, 1):
                     for cz0 in (-1, 1):
@@ -605,20 +767,39 @@ def emit_obj_overlay(d, obj_dir):
                 off = b * 8 + 1
                 f.write(f"f {off+q[0]} {off+q[1]} {off+q[2]}\n")
                 f.write(f"f {off+q[0]} {off+q[2]} {off+q[3]}\n")
-    print(f"  wrote {mesh_path}\n  wrote {skel_path}")
-    return mesh_path, skel_path
+
+    # Mesh split into per-dominant-bone objects so the binding is visible:
+    # each face is grouped by the dominant bone of its first vertex.
+    vert_bone = {i: d["bind_bones"][i * 3] for i in range(len(d["verts"]))}
+    with open(bones_path, "w") as f:
+        f.write(f"# {base} mesh colored by dominant bone assignment\n")
+        for b in range(12):
+            group_faces = [fi for fi, fa in enumerate(d["faces"])
+                           if vert_bone.get(d["wedges"][fa[0]][0], -1) == b]
+            if not group_faces:
+                continue
+            f.write(f"o Bone_{b}_{BONE_NAMES[b]}\n")
+            for w in d["wedges"]:
+                p = d["verts"][w[0]]
+                f.write(f"v {p[0]:.3f} {p[1]:.3f} {p[2]:.3f}\n")
+            for fi in group_faces:
+                fa = d["faces"][fi]
+                f.write(f"f {fa[0]+1} {fa[1]+1} {fa[2]+1}\n")
+    print(f"  wrote {mesh_path}\n  wrote {skel_path}\n  wrote {bones_path}")
+    return mesh_path, skel_path, bones_path
 
 
-def render_verify(blender, mesh_path, skel_path, obj_dir, base):
+def render_verify(blender, bones_path, skel_path, obj_dir, base):
     script = os.path.join(obj_dir, "render_verify.py")
     _write_render_script(script)
     # Blender resolves relative paths against its own CWD (C:\) — use absolute.
-    mesh_path = os.path.abspath(mesh_path)
+    bones_path = os.path.abspath(bones_path)
     skel_path = os.path.abspath(skel_path)
     front = os.path.abspath(os.path.join(obj_dir, f"{base}_front.png"))
     threeq = os.path.abspath(os.path.join(obj_dir, f"{base}_3q.png"))
+    back = os.path.abspath(os.path.join(obj_dir, f"{base}_back.png"))
     cmd = [blender, "-b", "--python-exit-code", "1", "-P", os.path.abspath(script),
-           "--", mesh_path, skel_path, front, threeq]
+           "--", bones_path, skel_path, front, threeq, back]
     print("  blender:", " ".join(cmd))
     r = subprocess_run(cmd)
     if r.returncode != 0:
@@ -629,44 +810,47 @@ def render_verify(blender, mesh_path, skel_path, obj_dir, base):
 
 def _write_render_script(path):
     script = r'''
-# Headless Blender overlay render: mesh (gray) + skeleton boxes (colored).
-import bpy, sys, math
+# Headless Blender overlay render: bone-colored mesh + skeleton boxes.
+# argv: mesh_bones.obj skeleton.obj out_front out_3q out_side
+import bpy, sys
 from mathutils import Vector
 argv = sys.argv[sys.argv.index("--") + 1:]
-mesh_obj, skel_obj, out_front, out_3q = argv
+bones_obj, skel_obj, out_front, out_3q, out_side = argv
 bpy.ops.wm.read_factory_settings(use_empty=True)
-bpy.ops.wm.obj_import(filepath=mesh_obj)
+bpy.ops.wm.obj_import(filepath=bones_obj)
 bpy.ops.wm.obj_import(filepath=skel_obj)
 scene = bpy.context.scene
-palette = [(0.9,0.2,0.2),(0.2,0.9,0.2),(0.2,0.2,0.9),(0.9,0.9,0.2),(1,0.5,0),
-           (1,0,0.5),(0.5,1,0),(0,1,1),(0.6,0.3,1),(0.9,0.6,0.2),(0.2,0.9,0.6),
-           (0.9,0.2,0.8),(0.5,0.5,0.5),(1,1,1)]
-def mat_color(name, col):
+palette = [(0.95,0.3,0.3),(0.3,0.95,0.3),(0.3,0.3,0.95),(0.95,0.95,0.2),(1,0.55,0),
+           (1,0.15,0.5),(0.55,1,0),(0,1,1),(0.65,0.35,1),(0.95,0.65,0.2),(0.2,0.95,0.65),
+           (0.9,0.2,0.85),(0.55,0.55,0.55),(1,1,1)]
+def mat(name, col, alpha=1.0):
     m = bpy.data.materials.new(name)
     m.use_nodes = False
-    m.diffuse_color = (col[0], col[1], col[2], 1.0)
+    m.diffuse_color = (col[0], col[1], col[2], alpha)
     return m
-meshes = [o for o in scene.objects if o.type == "MESH"]
-for o in meshes:
-    if "Bone_" in o.name:
-        idx = int(o.name.split("_")[1])
-        o.data.materials.append(mat_color(o.name, palette[idx % len(palette)]))
+# Color mesh groups by bone index, skeletons as thin wireframe overlay.
+for o in [o for o in scene.objects if o.type == "MESH"]:
+    if "Skel_" in o.name:
+        o.data.materials.append(mat(o.name, (0.05, 0.05, 0.05), 1.0))
         o.show_wire = True
         o.show_all_edges = True
+        # Keep the box faces see-through so the mesh shows through: only the
+        # edges are drawn, faces get a faint transparent fill.
+        o.data.materials[0].diffuse_color = (0.0, 0.0, 0.0, 0.15)
+    elif "Bone_" in o.name:
+        idx = int(o.name.split("_")[1])
+        o.data.materials.append(mat(o.name, palette[idx % len(palette)]))
     else:
-        o.data.materials.append(mat_color("MeshMat", (0.8, 0.8, 0.8)))
-        o.data.materials[0].use_nodes = False
-# Frame the whole body.
-pts = [o.matrix_world @ v.co for o in meshes for v in o.data.vertices]
+        o.data.materials.append(mat("m", (0.8, 0.8, 0.8)))
+pts = [o.matrix_world @ v.co for o in scene.objects if o.type == "MESH" for v in o.data.vertices]
 mn = Vector((min(v.x for v in pts), min(v.y for v in pts), min(v.z for v in pts)))
 mx = Vector((max(v.x for v in pts), max(v.y for v in pts), max(v.z for v in pts)))
 ctr = (mn + mx) / 2
-rad = max((mx - mn).length * 1.5, 60.0)
+rad = max((mx - mn).length * 1.6, 60.0)
 scene.render.engine = "BLENDER_WORKBENCH"
 scene.display.shading.color_type = "MATERIAL"
-scene.display.shading.show_cavity = True
-scene.render.resolution_x = 640
-scene.render.resolution_y = 640
+scene.render.resolution_x = 700
+scene.render.resolution_y = 700
 scene.render.image_settings.file_format = "PNG"
 def render_shot(out_path, cam_pos):
     cam = bpy.data.objects.new("Cam", bpy.data.cameras.new("C"))
@@ -679,8 +863,9 @@ def render_shot(out_path, cam_pos):
     scene.render.filepath = out_path
     bpy.ops.render.render(write_still=True)
     scene.collection.objects.unlink(cam)
-render_shot(out_front, (0.0, rad, rad * 0.45))
-render_shot(out_3q, (rad * 0.75, rad * 0.75, rad * 0.55))
+render_shot(out_front, (0.0, rad, rad * 0.35))
+render_shot(out_3q, (rad * 0.7, rad * 0.7, rad * 0.5))
+render_shot(out_side, (rad, 0.0, rad * 0.35))
 '''
     with open(path, "w") as f:
         f.write(script)
@@ -698,6 +883,8 @@ def main(argv):
                     help="comma list of Selection mesh names; default all mapped")
     ap.add_argument("--out", default="RagdollPkg/Src/RagdollDatasets.h")
     ap.add_argument("--obj-dir", default="tools/rig_verify")
+    ap.add_argument("--fold", type=float, default=0.0,
+                    help="forearm fold angle in degrees (0 = natural standing pose; default 0)")
     ap.add_argument("--render", action="store_true",
                     help="render OBJ overlays with headless Blender")
     args = ap.parse_args(argv)
@@ -712,9 +899,9 @@ def main(argv):
     built = []
     for live, sel in pairs:
         print(f"\n=== {sel} (live: {live}) ===")
-        d = build_rig(pkg, sel, live)
+        d = build_rig(pkg, sel, live, fold_deg=args.fold)
         built.append(d)
-        mesh_path, skel_path = emit_obj_overlay(d, args.obj_dir)
+        emit_obj_overlay(d, args.obj_dir)
 
     emit_header(built, args.out)
 
@@ -725,9 +912,9 @@ def main(argv):
         else:
             for d in built:
                 base = d["sel_name"]
-                mesh_path = os.path.join(args.obj_dir, f"{base}_mesh.obj")
+                bones_path = os.path.join(args.obj_dir, f"{base}_mesh_bones.obj")
                 skel_path = os.path.join(args.obj_dir, f"{base}_skeleton.obj")
-                render_verify(blender, mesh_path, skel_path, args.obj_dir, base)
+                render_verify(blender, bones_path, skel_path, args.obj_dir, base)
 
 
 if __name__ == "__main__":

@@ -169,6 +169,10 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 		DS = FindRagdollDataset( LiveMesh->GetName() );
 	const FRagdollBoneDef* Defs = DS ? DS->Bones : GRagdollBoneDefs;
 	S.BoneDefs = Defs;
+	// Real-mesh skeletons skip the feet (foot verts are bound rigidly to the
+	// shins; a separate foot body is what scrambles the ankles). Box fallback
+	// keeps all 14.
+	S.NumBodies = DS ? 12 : RAGDOLL_BONE_COUNT;
 	if( DS )
 		debugf( TEXT("RagdollPkg: BuildRagdoll %s dataset=%s"), C->GetName(), DS->DatasetName );
 
@@ -192,9 +196,11 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	FLOAT BaseSpeed  = DeathVel.Size();
 	if( BaseSpeed < 0.5f )
 	{
-		DeathVel.X += ( appFrand() * 2.0f - 1.0f ) * 3.0f;
-		DeathVel.Y += ( appFrand() * 2.0f - 1.0f ) * 3.0f;
-		DeathVel.Z += 1.0f;
+		// Mild randomized kick so a stationary corpse still flops, but gentle
+		// enough that the long real-mesh limbs don't flail apart on the drop.
+		DeathVel.X += ( appFrand() * 2.0f - 1.0f ) * 1.0f;
+		DeathVel.Y += ( appFrand() * 2.0f - 1.0f ) * 1.0f;
+		DeathVel.Z += 0.4f;
 		BaseSpeed = DeathVel.Size();
 	}
 	// Clamp so a fast fall or hit doesn't blast the body out of the world or
@@ -204,7 +210,7 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 		DeathVel *= MaxImpulse / BaseSpeed;
 
 	// Ragdoll bodies.
-	for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+	for( INT i=0; i<S.NumBodies; i++ )
 	{
 		const FRagdollBoneDef& D = Defs[i];
 		FVector Center = Origin + DrawScale * FVector( D.CX, D.CY, D.CZ );
@@ -218,17 +224,18 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 		Bd.gravityScale   = 1.0f;
 		S.Bodies[i] = b3CreateBody( S.World, &Bd );
 
-		// Per-body randomized impulse + tumble so the corpse acts floppy and
-		// lands differently every time.
+		// Small per-body jitter so the corpse lands differently every time but
+		// doesn't explode into a flailing tangle on spawn (the real-mesh limbs
+		// are long; big random spins stretch the skin and look like tearing).
 		b3Vec3 V;
-		V.x = DeathVel.X + ( appFrand() * 2.0f - 1.0f ) * 1.2f;
-		V.y = DeathVel.Y + ( appFrand() * 2.0f - 1.0f ) * 1.2f;
-		V.z = DeathVel.Z + ( appFrand() * 2.0f - 1.0f ) * 0.8f;
+		V.x = DeathVel.X + ( appFrand() * 2.0f - 1.0f ) * 0.4f;
+		V.y = DeathVel.Y + ( appFrand() * 2.0f - 1.0f ) * 0.4f;
+		V.z = DeathVel.Z + ( appFrand() * 2.0f - 1.0f ) * 0.3f;
 		b3Body_SetLinearVelocity( S.Bodies[i], V );
 		b3Vec3 W;
-		W.x = ( appFrand() * 2.0f - 1.0f ) * 5.0f;
-		W.y = ( appFrand() * 2.0f - 1.0f ) * 5.0f;
-		W.z = ( appFrand() * 2.0f - 1.0f ) * 3.0f;
+		W.x = ( appFrand() * 2.0f - 1.0f ) * 1.8f;
+		W.y = ( appFrand() * 2.0f - 1.0f ) * 1.8f;
+		W.z = ( appFrand() * 2.0f - 1.0f ) * 1.2f;
 		b3Body_SetAngularVelocity( S.Bodies[i], W );
 
 		FLOAT HX = D.HX * DrawScale * RAGDOLL_U2M;
@@ -278,14 +285,19 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	AddJoint( S, BONE_Neck,      BONE_Head,      Defs, Anch[2], DrawScale, { JK_Ball, 0.44f, -0.26f,  0.26f, 0.4f } );
 	AddJoint( S, BONE_Spine,     BONE_UpperArmL, Defs, Anch[3], DrawScale, { JK_Ball, 1.40f, -0.44f,  0.44f, 0.7f } );
 	AddJoint( S, BONE_Spine,     BONE_UpperArmR, Defs, Anch[4], DrawScale, { JK_Ball, 1.40f, -0.44f,  0.44f, 0.7f } );
-	AddJoint( S, BONE_UpperArmL, BONE_ForearmL,  Defs, Anch[5], DrawScale, { JK_Hinge, -0.12f, 1.90f, 0.0f, 0.5f } );
-	AddJoint( S, BONE_UpperArmR, BONE_ForearmR,  Defs, Anch[6], DrawScale, { JK_Hinge, -0.12f, 1.90f, 0.0f, 0.5f } );
+	AddJoint( S, BONE_UpperArmL, BONE_ForearmL,  Defs, Anch[5], DrawScale, { JK_Hinge, -0.12f, 1.10f, 0.0f, 0.5f } );
+	AddJoint( S, BONE_UpperArmR, BONE_ForearmR,  Defs, Anch[6], DrawScale, { JK_Hinge, -0.12f, 1.10f, 0.0f, 0.5f } );
 	AddJoint( S, BONE_Pelvis,    BONE_ThighL,    Defs, Anch[7], DrawScale, { JK_Ball, 1.22f, -0.52f,  0.52f, 0.8f } );
 	AddJoint( S, BONE_Pelvis,    BONE_ThighR,    Defs, Anch[8], DrawScale, { JK_Ball, 1.22f, -0.52f,  0.52f, 0.8f } );
-	AddJoint( S, BONE_ThighL,    BONE_ShinL,     Defs, Anch[9], DrawScale, { JK_Hinge, -1.70f, 0.12f, 0.0f, 0.6f } );
-	AddJoint( S, BONE_ThighR,    BONE_ShinR,     Defs, Anch[10], DrawScale, { JK_Hinge, -1.70f, 0.12f, 0.0f, 0.6f } );
-	AddJoint( S, BONE_ShinL,     BONE_FootL,     Defs, Anch[11], DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
-	AddJoint( S, BONE_ShinR,     BONE_FootR,     Defs, Anch[12], DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
+	AddJoint( S, BONE_ThighL,    BONE_ShinL,     Defs, Anch[9], DrawScale, { JK_Hinge, -1.30f, 0.12f, 0.0f, 0.6f } );
+	AddJoint( S, BONE_ThighR,    BONE_ShinR,     Defs, Anch[10], DrawScale, { JK_Hinge, -1.30f, 0.12f, 0.0f, 0.6f } );
+	// Feet are skipped from real-mesh ragdolls; only the box skeleton keeps the
+	// ankle joints (bodies 12/13 only exist in the box path).
+	if( !DS )
+	{
+		AddJoint( S, BONE_ShinL, BONE_FootL, Defs, Anch[11], DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
+		AddJoint( S, BONE_ShinR, BONE_FootR, Defs, Anch[12], DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
+	}
 
 	// Lift bodies that spawned inside level geometry (ramp/stairs deaths) so the
 	// first step doesn't explode them. Must run before the first StepRagdoll.
@@ -386,7 +398,7 @@ static void SyncRagdollImpl( ARagdollCarcass* C )
 		FLOAT DrawScale = ( C->DrawScale > 0.0f ) ? C->DrawScale : 1.0f;
 		const FRagdollBoneDef* Defs = S->BoneDefs ? S->BoneDefs : GRagdollBoneDefs;
 		FLOAT MaxR = 20.0f, MaxUp = 20.0f, MaxDown = 20.0f;
-		for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+		for( INT i=0; i<S->NumBodies; i++ )
 		{
 			b3WorldTransform BT = b3Body_GetTransform( S->Bodies[i] );
 			const FRagdollBoneDef& D = Defs[i];
@@ -437,7 +449,7 @@ static void ShutdownRagdollImpl( ARagdollCarcass* C )
 			&& LW.World.index1 == S->World.index1 && LW.World.generation == S->World.generation;
 		if( WorldStillValid )
 		{
-			for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+			for( INT i=0; i<S->NumBodies; i++ )
 				if( b3Body_IsValid( S->Bodies[i] ) )
 					b3DestroyBody( S->Bodies[i] );
 		}
@@ -523,7 +535,7 @@ void ARagdollCarcass::execApplyDamageImpulse( FFrame& Stack, RESULT_DECL )
 	{
 		INT Closest = -1;
 		FLOAT ClosestD = 1e9f;
-		for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+		for( INT i=0; i<S->NumBodies; i++ )
 		{
 			b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
 			FLOAT dx = T.p.x - Hit.x, dy = T.p.y - Hit.y, dz = T.p.z - Hit.z;
@@ -546,27 +558,27 @@ void ARagdollCarcass::execApplyDamageImpulse( FFrame& Stack, RESULT_DECL )
 	// hit limb instead of a subtle nudge.
 	const FLOAT CloseRadius = 0.40f; // full-strength zone (m, ~20 UU)
 	const FLOAT MaxRadius   = 1.50f; // beyond this only the min nudge remains
-	FLOAT BaseSpeed = 6.0f + Min( Damage, 120 ) * 0.10f;
-	if( BaseSpeed > 16.0f )
-		BaseSpeed = 16.0f;
+	FLOAT BaseSpeed = 3.5f + Min( Damage, 120 ) * 0.05f;
+	if( BaseSpeed > 8.0f )
+		BaseSpeed = 8.0f;
 
-	for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+	for( INT i=0; i<S->NumBodies; i++ )
 	{
 		b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
 		FLOAT dx = T.p.x - Hit.x, dy = T.p.y - Hit.y, dz = T.p.z - Hit.z;
 		FLOAT Dist  = sqrt( dx*dx + dy*dy + dz*dz );
 		FLOAT Scale = 1.0f - ( Dist - CloseRadius ) / Max( MaxRadius - CloseRadius, 0.001f );
-		if( Scale < 0.2f )
-			Scale = 0.2f; // minimum nudge keeps every body awake and reacting
+		if( Scale < 0.25f )
+			Scale = 0.25f; // minimum nudge keeps every body awake and reacting
 		FLOAT Speed = BaseSpeed * Scale;
 		FLOAT Mass  = b3Body_GetMass( S->Bodies[i] );
 		b3Vec3 Imp;
 		Imp.x = Dir.x * Speed * Mass;
 		Imp.y = Dir.y * Speed * Mass;
 		if( Dist <= CloseRadius )
-			Imp.z = ( Dir.z * Speed + 5.0f ) * Mass;   // hit limb pops up visibly
+			Imp.z = ( Dir.z * Speed + 2.0f ) * Mass;   // hit limb pops up visibly
 		else
-			Imp.z = ( Dir.z * Speed + 2.0f ) * Mass;
+			Imp.z = ( Dir.z * Speed + 0.8f ) * Mass;
 		if( Dist <= CloseRadius )
 			b3Body_ApplyLinearImpulse( S->Bodies[i], Imp, Hit, true );      // at hit point -> torque
 		else
@@ -619,7 +631,7 @@ void ARagdollCarcass::execWalkOverPush( FFrame& Stack, RESULT_DECL )
 	FLOAT Py = P->Location.Y * RAGDOLL_U2M;
 	FLOAT FootZ = ( P->Location.Z - P->CollisionHeight ) * RAGDOLL_U2M;
 
-	for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+	for( INT i=0; i<S->NumBodies; i++ )
 	{
 		b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
 		FLOAT dx = T.p.x - Px, dy = T.p.y - Py, dz = T.p.z - FootZ;

@@ -578,7 +578,7 @@ FBox URagdollMesh::GetRenderBoundingBox( const AActor* Owner, UBOOL Exact )
 	FLOAT DrawScale = ( Owner && Owner->DrawScale > 0.0f ) ? Owner->DrawScale : 1.0f;
 	if( S && S->bBuilt )
 	{
-		for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+		for( INT i=0; i<S->NumBodies; i++ )
 		{
 			b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
 			FVector C( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );

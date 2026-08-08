@@ -230,7 +230,7 @@ void ClearCorpseSpawn( FRagdollState& S, FRagdollLevelWorld& LW )
 	INT Lifted = 0;
 	static INT GDbgCorpses = 0;
 	const UBOOL bDbg = ( GDbgCorpses < 3 );
-	for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+	for( INT i=0; i<S.NumBodies; i++ )
 	{
 		b3Vec3 P = b3Body_GetPosition( S.Bodies[i] );
 		b3Vec3 Origin      = { P.x, P.y, P.z + 0.35f };

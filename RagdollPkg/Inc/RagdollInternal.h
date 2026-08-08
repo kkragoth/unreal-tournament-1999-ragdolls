@@ -73,6 +73,7 @@ struct FRagdollState
 	UBOOL         bFrameRangeLogged;
 	UBOOL         bOutOfWorldLogged;
 	INT           SyncCount;
+	INT           NumBodies;  // bodies actually created (12 real-mesh, 14 box)
 	b3WorldId     World;   // shared level world (see FRagdollLevelWorld)
 	URagdollMesh* Mesh;
 	b3BodyId      Bodies[RAGDOLL_BONE_COUNT];
