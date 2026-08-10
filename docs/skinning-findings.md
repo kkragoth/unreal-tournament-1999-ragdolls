@@ -4,6 +4,14 @@ Status: **REVERTED / DISABLED**. All corpses render as the procedural box manneq
 Re-read this file before picking this feature back up. The active plan for picking
 it back up is `plans/real-mesh.md` (multi-model Selection-mesh pipeline).
 
+## NOTE (2026-08-09) — binding classifier rework in flight
+
+`handoff.md` "ACTIVE: binding rework" supersedes the region-band wording in this
+file and in `plans/real-mesh.md` step 5 ("nearest-bone assignment" is the goal;
+the *region-threshold* classifier currently used to force it mis-labels wide foot
+verts — |x|>11 — as "arm column" and binds them to the forearms). Proximity-to-
+bone-box binding replaces it.
+
 ## Decision
 
 The old runtime real-mesh capture path was reverted and stays gated off behind

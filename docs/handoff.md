@@ -1,6 +1,6 @@
 # RagdollPkg Real-Mesh Skin — Handoff
 
-Status date: 2026-08-08. Read this first, then the relevant section in
+Status date: 2026-08-09. Read this first, then the relevant section in
 `docs-skinning-findings.md` and `AGENTS.md` before doing anything.
 
 ## Where things stand (TL;DR)
@@ -17,6 +17,35 @@ Real-mesh corpses now work end-to-end:
 - Playtest log is clean: no crash, no NaN/inf, no stretched triangles
   (`RealTris spike=0`), physics pelvis velocity stays 0-5 m/s (no more
   explosion where bodies flew 12+ m apart).
+
+## ACTIVE: binding rework — region thresholds → proximity (2026-08-09)
+
+The current `bind_verts` uses **region classification** (`fore_idx`/`arm_idx`/
+`leg_idx` from `derive_bones`) to force verts to bones. A color-coded render
+exposed a real bug in that approach, confirmed by the user in Blender:
+
+- `derive_bones` labels the "arm column" as **every vert with `|x| > 11`** down
+  to the floor (`arms_wide` at build_rig.py:143, `fore_idx` at :241). But the
+  **feet are also wider than 11** (SelectionMale2 foot verts at x=+17.2, +14.9,
+  -17.8), so the outer edges of the feet are classified as "arm column" and
+  **bound to the forearm bones (6/7)**. That is why the foot-sole faces read as
+  "weld" (arm+leg mixed) and why dropping them punched holes in the soles.
+- Numbers (SelectionMale2): 58 weld faces total = **14 at foot level**
+  (z<-36.6) + 44 at thigh level. The 14 foot-level ones are genuine FOOT
+  geometry mis-bound to forearms (e.g. f256: b6 vert at z=-41.43 = the sole;
+  f473: b6 vert at x=-17.8 z=-41.2; f594: b7 vert at x=14.3 z=-41.2).
+- So the "hands reach the feet" artifact is a **classifier bug**, not real
+  geometry: the hands hang at thigh height (user confirmed in Blender), and the
+  flat `|x|>11` sweep cannot tell a hand at thigh height from a wide foot.
+
+Decision: **rewrite binding to be proximity-to-bone-box driven** — each vertex
+binds to the closest bone BOX (the physics box the ragdoll actually spawns),
+with region labels used only as tie-breakers (foot→shin, arm→armbone, since
+feet are skipped from the ragdoll). This is the "Strategy B vert-by-vert"
+direction the user approved. The user will iterate visually (Blender/Unity
+color-coded render) to confirm bones make sense per model.
+
+Status: docs updated first, code not yet changed. See todo list in session.
 
 ## The two big bugs found + fixed this session
 
@@ -38,6 +67,61 @@ Also fixed earlier: negative shin half-height (inverted shin box),
 smooth-skinning 3-color overlap → rigid single-bone binding, foot boxes derived
 from scattered source verts (reverted — not needed since mesh is complete).
 
+## Weld-surgery investigation (2026-08-09) — REVERTED, do not resume as-is
+
+An uncommitted experiment tried to fix "missing parts in legs" in the exported
+OBJ by dropping the hand↔leg "weld" faces (faces whose verts bind to both
+ARM={4..7} and LEG={8..13}) and fan-capping the cut rims, then nudging the
+forearm column outward. **It was abandoned and reverted to commit 193039d.**
+The backups are in
+`C:\Users\kkragoth\AppData\Local\Temp\opencode\surgery_backup\`
+(`build_rig_surgery.py`, `RagdollDatasets_surgery.h`). Findings:
+
+- The viewer bind pose hangs the hands against the thighs/shin/feet, so the
+  mesh genuinely shares triangles between arm- and leg-bound verts; those
+  "weld" faces would spike when the ragdoll separates the limbs. Dropping them
+  is the right *idea* but the capping is the hard part.
+- The cut seam is NOT a simple boundary. Per hand there are 3 seam loops:
+  a big mixed loop (Male2 loop0 n=20 `C L…L C A A A`, loop3 n=18) wrapping the
+  whole thigh/shin/foot, a separate all-arm rim loop (loop2 n=12, loop4 n=5),
+  and a **kept-triangle island loop** (loop1 n=3 = the kept face f167) sitting
+  inside the dropped patch. The island loop got fan-capped back into a
+  duplicate of f167 (f167/f555 identical triangles).
+- The loop tracer picks `nxts[0]` at each vertex and weaves THROUGH kept faces
+  (loop0's seam borders 14 kept LEG faces with kept faces lying inside the
+  traced polygon), so the traced loops are not simple polygons and their fan
+  caps land on the kept surface.
+- Quantitative proof (`cap_overlap.py`): **50 cap edges have same-side apexes
+  with the kept face sharing that edge** — e.g. cap 537=(201,43,194) overlaps
+  kept face 186 across (43,194); cap 551=(211,220,69) overlaps kept face 130
+  across (211,220). The `dot(fn, ref)` flip in `add_cap` only fixes opposite-side
+  winding; it cannot fix same-side overlaps.
+- Fan-capping a curved 3D strip is fundamentally limited: even the "ear" of a
+  rim edge can lie on the kept side, so ear-clipping alone won't fix it either.
+  The caps are also z-occluded in deep creases (invisible even with backface
+  culling off), so per-face render visibility tests misled the investigation.
+- Mesh data today is inspection-only: real-mesh skinning is ON but gated by a
+  runtime check (`bRealMesh` when `VertBinds.Num()==FrameVerts` in
+  `UnRagdollMesh.cpp`), and the exported OBJ in `tools/rig_verify/` is the
+  artifact the user opens. The committed export is COMPLETE (no holes), so the
+  "missing parts" came from the surgery itself, not from the committed mesh.
+
+### Re-enable path, if ever wanted (do NOT do lightly)
+
+1. Fix the seam loop tracer to follow true simple boundaries: walk the
+   boundary of the dropped-patch region honoring non-manifold seams (a vertex
+   shared by >2 seam edges), keep islands as inner loops, and never cross a
+   kept face. Verify loops are simple polygons (no self-intersection).
+2. Fill each hole with ear-clipping / constrained triangulation oriented
+   against each rim edge's kept-face normal — NOT a fan from one anchor.
+   Enforce "no triangle fuses an ARM vert to a LEG vert" per triangle, and
+   keep islands un-capped (they are kept faces, not holes).
+3. Verify with `fold_check.py` (target 0 org+cap same-direction duplicate
+   edges) and `enclosed_diff.py` (target ~0 new enclosed-background pixels vs
+   the pre-surgery mesh across all 6 views), not with per-face render tests.
+4. Then rebuild header + DLL, deploy to retail `System\`, and re-open the OBJs
+   in Unity.
+
 ## Current tooling
 
 - `tools/build_rig.py` — full pipeline per Selection mesh:
@@ -45,8 +129,9 @@ from scattered source verts (reverted — not needed since mesh is complete).
   - `derive_bones` → 14 bone centers/halves from geometry (region bands)
   - `_enforce_clearance` → push arm boxes outward off the legs
   - translate pelvis to origin, `compute_anchors` (13 joints)
-  - `bind_verts` → rigid 1-bone bind with arm/leg exclusion + feet→shin +
-    forearms→forearm override (feet skipped from ragdoll)
+  - `bind_verts` → rigid 1-bone bind (ACTIVE REWORK: region-threshold
+    classification is being replaced with proximity-to-bone-box binding;
+    region labels become tie-breakers only)
   - verify: no bone starvation, bones on clusters, no non-adjacent
     interpenetration
   - emit `RagdollPkg/Src/RagdollDatasets.h` (5 models) + OBJ overlays
@@ -75,6 +160,16 @@ copy System\RagdollPkg.dll <retail>\System\
 
 ## OPEN QUESTIONS — ask the user / decide
 
+0. **"Missing parts in legs" (the weld-surgery motivator) is now understood
+   and shelved.** The exported mesh is complete and matches Blender; the
+   uncommitted weld surgery (drop + cap the hand↔leg fused faces) produced
+   overlapping/invisible caps that READ as "missing parts". It was reverted
+   (see the investigation section above). The underlying concern remains:
+   when real-mesh skinning actually runs the ragdoll, the fused hand↔leg faces
+   will stretch into spikes. Decide whether that ever matters (it is cosmetic
+   today since skinning is gated by the runtime `bRealMesh` check, not a
+   compile gate) before resuming any surgery.
+
 1. **Natural pose vs. arm fold.** Right now the bind pose is natural
    (arms hang down, hands against the thighs). The bone-color renders show the
    hand region overlapping the thigh/shin colors because the hands physically
@@ -100,12 +195,13 @@ copy System\RagdollPkg.dll <retail>\System\
    (`AddJoint` specs in RagdollCarcass.cpp) and the death/damage impulse
    magnitudes.
 
-4. **Strategy B (vert-by-vert assignment)** was approved by the user earlier
-   but not implemented. The user does not know Blender, so any per-vertex
-   review tool must NOT require Blender (e.g. numbered OBJ + CSV/text table of
-   vertex→bone, and an overrides file the rig reads back). Only pursue if the
-   auto-binding (rigid, classification-based) still shows wrong regions after
-   the above.
+4. **Strategy B (vert-by-vert assignment)** — IN PROGRESS as the binding
+   rework. The current region-threshold binding mis-labels wide foot verts
+   (|x|>11) as "arm column" and binds them to the forearms; proximity-to-bone-box
+   binding replaces it. The user will review per model via the color-coded
+   OBJ/PNG overlay (bones as colors) and, if needed, a numbered OBJ + CSV/text
+   table + overrides file the rig reads back. The user does not use Blender for
+   editing, so any per-vertex review tool must NOT require Blender interaction.
 
 ## Gotchas / traps
 

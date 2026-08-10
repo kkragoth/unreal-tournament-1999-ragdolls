@@ -98,6 +98,9 @@ precomputed dataset. No runtime frame scanning, no CPU burn.
 5. Bind: nearest-bone assignment of every vertex in bind space ->
    per-vertex `{boneIndex, boneLocalOffset}`. Assert every bone gets verts (no
    starvation) AND that each bone's own verts are within its box (tight fit).
+   **2026-08-09: this is the proximity-to-bone-box binding (see handoff.md
+   "ACTIVE: binding rework") — NOT region-threshold classification, which
+   mis-labels wide feet as "arm column".**
 6. **Verify externally (headless Blender, `blender.exe -b`):** render an OBJ
    overlay of the mesh + derived skeleton boxes from front and 3/4 views; check
    BOTH torso AND arms/legs (review #1 resolved: arms verified per model, not

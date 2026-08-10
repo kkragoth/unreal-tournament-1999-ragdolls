@@ -496,13 +496,19 @@ def build_rig(pkg, sel_name, live_name=None, frame=0, fold_deg=0):
     # SpecialVerts that are baked into the raw iVertex values).
     wedges = [(remap[w[0] + m.special_verts], w[1], w[2]) for w in m.wedges]
 
-    # Keep the mesh COMPLETE. Earlier iterations tried to drop "arm-leg bridge"
-    # faces so they wouldn't stretch when the ragdoll separates the limbs, but
-    # the classification over-matched: it deleted ~10% of the whole mesh along
-    # the arm-torso seam (the arm hangs against the body in the bind pose, so
-    # those shared triangles ARE the character's skin). The raw mesh is closed
-    # and correct as-is, so we export it untouched.
-    faces = list(m.faces)
+    # Drop the fused hand<->leg "weld" faces. The bind pose hangs the hands
+    # against the thighs/shin, so the mesh genuinely contains triangles whose
+    # verts bind to BOTH a forearm bone (fore_idx, bones 6/7) and a leg bone
+    # (leg_idx, bones 8..13). Those triangles stretch into long spikes the
+    # moment the ragdoll separates the limbs ("thighs glued to hands"). They
+    # are dropped WITHOUT capping: the rim holes sit in the deep crease where
+    # the hand meets the leg (invisible in-game). Earlier attempts to fan-cap
+    # the rims produced overlapping/invisible caps (see handoff.md); drop-only
+    # is strictly narrower.
+    faces = [f for f in m.faces
+             if not _is_arm_leg_face(f, wedges, rep["fore_idx"], rep["leg_idx"])]
+    print(f"  dropped {len(m.faces) - len(faces)} weld faces "
+          f"(kept {len(faces)}/{len(m.faces)})")
 
     return {
         "live_name": live_name or sel_name,
