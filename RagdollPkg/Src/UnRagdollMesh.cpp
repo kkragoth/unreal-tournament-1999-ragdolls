@@ -187,7 +187,8 @@ URagdollMesh* CreatePlayerRagdollMesh( ARagdollCarcass* Carcass, FRagdollState& 
 	ULodMesh* Src = Cast<ULodMesh>( Carcass ? Carcass->Mesh : NULL );
 	if( !Src )
 		return NULL;
-	const FRagdollDatasetEntry* DS = FindRagdollDataset( Src->GetName() );
+	const FRagdollDatasetEntry* DS = RagdollForceBoxes( Carcass )
+		? NULL : FindRagdollDataset( Src->GetName() );
 	if( !DS )
 	{
 		debugf( TEXT("RagdollMesh: no dataset for mesh=%s -> box fallback"), Src->GetName() );

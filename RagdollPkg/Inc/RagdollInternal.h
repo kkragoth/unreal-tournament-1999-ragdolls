@@ -150,6 +150,12 @@ struct FRagdollDatasetEntry
 // falls back to the procedural box mannequin).
 const FRagdollDatasetEntry* FindRagdollDataset( const TCHAR* LiveMeshName );
 
+// True when the class config flag bBoxMannequins forces box-mannequin corpses,
+// overriding any available real-mesh dataset. Toggled at runtime with
+// "set RagdollPkg.RagdollCarcass bBoxMannequins 1" or via UnrealTournament.ini
+// ([RagdollPkg.RagdollCarcass]); affects corpses spawned afterwards.
+UBOOL RagdollForceBoxes( UObject* Obj );
+
 // Real-mesh factory (UnRagdollMesh.cpp). Builds a URagdollMesh from the
 // precomputed dataset for the owning carcass's player mesh (ULodMesh), filling
 // S.VertBones/S.VertOffsets so GetFrame can rigidly attach the Selection mesh

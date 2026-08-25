@@ -20,3 +20,11 @@ const FRagdollDatasetEntry* FindRagdollDataset( const TCHAR* LiveMeshName )
 			return &GRagdollDatasetTable[i];
 	return NULL;
 }
+
+UBOOL RagdollForceBoxes( UObject* Obj )
+{
+	if( !Obj )
+		return 0;
+	const FString V = Obj->GetPropertyText( TEXT("bBoxMannequins") );
+	return appStricmp( *V, TEXT("True") ) == 0 || appAtoi( *V ) != 0;
+}

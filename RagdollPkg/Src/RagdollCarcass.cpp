@@ -163,9 +163,11 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	// Per-model dataset (derived skeleton + anchors) or canonical box skeleton.
 	// The Carcass carries the dead pawn's ULodMesh (set by Initfor before
 	// BuildRagdoll), so its name resolves the dataset for real-mesh corpses.
+	// bBoxMannequins (class config) forces the box fallback even when a
+	// dataset exists - toggle via ini or the console "set" command.
 	const FRagdollDatasetEntry* DS = NULL;
 	ULodMesh* LiveMesh = Cast<ULodMesh>( C->Mesh );
-	if( LiveMesh )
+	if( LiveMesh && !RagdollForceBoxes( C ) )
 		DS = FindRagdollDataset( LiveMesh->GetName() );
 	const FRagdollBoneDef* Defs = DS ? DS->Bones : GRagdollBoneDefs;
 	S.BoneDefs = Defs;

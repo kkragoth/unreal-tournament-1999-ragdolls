@@ -9,11 +9,19 @@
 // The visual is produced by URagdollMesh::GetFrame, which reads the Box3D
 // bone transforms each frame and outputs world-space vertices.
 class RagdollCarcass extends Carcass
-	native;
+	native
+	config;
 
 var float SimFreq;
 var int   SimSubSteps;
 var float DeathImpulseScale;
+
+// Runtime toggle: when true, corpses use procedural box mannequins (14 bodies,
+// no mesh skinning) even for models that have a real-mesh dataset. Persisted to
+// UnrealTournament.ini under [RagdollPkg.RagdollCarcass]. Toggle in game with:
+//   set RagdollPkg.RagdollCarcass bBoxMannequins 1
+// (0 = real skinned mesh). Affects corpses spawned after the change.
+var() globalconfig bool bBoxMannequins;
 
 native function BuildRagdoll();
 native function StepRagdoll(float DeltaSeconds);
@@ -116,6 +124,7 @@ defaultproperties
 	SimFreq=50.0
 	SimSubSteps=4
 	DeathImpulseScale=1.0
+	bBoxMannequins=false
 	bAlwaysTick=true
 	RemoteRole=ROLE_SimulatedProxy
 	DrawType=DT_Mesh
