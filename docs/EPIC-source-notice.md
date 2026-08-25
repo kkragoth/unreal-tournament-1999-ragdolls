@@ -1,8 +1,10 @@
 # Epic Games Unreal Tournament Public Source — Notice
 
-The files under `thirdparty/ut99sdk/` (Core and Engine headers plus the prebuilt
-`Core.lib` / `Engine.lib` import libraries) originate from Epic Games' "Unreal
-Tournament Public Source Distribution" and are the property of
+This repository intentionally contains **no** files from Epic Games' "Unreal
+Tournament Public Source Distribution". To build it you must obtain the Core
+and Engine headers plus the prebuilt `Core.lib` / `Engine.lib` import libraries
+yourself from the official distribution and place them under
+`thirdparty/ut99sdk/` (see the README). Those files are the property of
 [Epic Games, Inc](http://www.epicgames.com).
 
 Quoting the original distribution README:
@@ -14,5 +16,5 @@ Quoting the original distribution README:
 > or things you created based on the source.
 
 This project also requires a legally obtained retail copy of Unreal Tournament
-'99 (the runtime DLLs and game content). Nothing in this repository may be used
-commercially.
+'99 (the runtime DLLs and game content). Nothing in this repository or its
+build outputs may be used commercially.

@@ -18,11 +18,20 @@ physics library.
 
 ```
 RagdollPkg/            the UT package: native C++ (Src/, Inc/) + UnrealScript (Classes/)
-thirdparty/box3d       Box3D physics library, vendored snapshot (see VENDORED.md there)
-thirdparty/ut99sdk/    minimal UE1 SDK subset: Core/Engine headers + prebuilt import libs
 tools/                 Python pipeline: extract meshes from .u files -> rig -> datasets header
 docs/                  findings, plans, handoff notes from the development sessions
+thirdparty/            NOT in the repo - provision locally (see below); gitignored
 ```
+
+`thirdparty/` holds two local-only dependencies and is deliberately **not
+tracked in git**:
+
+- `thirdparty/ut99sdk/` - Unreal Engine 1 headers (`Core/Inc`, `Engine/Inc`)
+  plus prebuilt import libs (`Core/Lib/Core.lib`, `Engine/Lib/Engine.lib`),
+  taken from Epic's UT99 public source distribution. Not redistributable here.
+- `thirdparty/box3d/` - [Box3D](https://github.com/erincatto/box3d) physics
+  library source snapshot. Keep upstream out of this repo's history; clone it
+  separately and copy (or use your own fork/submodule).
 
 ## Prerequisites
 
@@ -31,6 +40,25 @@ docs/                  findings, plans, handoff notes from the development sessi
 - A retail Unreal Tournament installation (provides `Core.dll`, `Engine.dll`,
   `ucc.exe` and the game content at runtime)
 - Python 3 for the tooling (Blender optional, only for rig verification renders)
+- Local `thirdparty/` contents (see above). Expected layout:
+
+```
+thirdparty/
+├── box3d/                 box3d repo checkout (root CMakeLists.txt, src/, include/)
+│   └── ...
+└── ut99sdk/
+    ├── Core/
+    │   ├── Inc/           Core headers from the UT99 public source distribution
+    │   └── Lib/Core.lib
+    └── Engine/
+        ├── Inc/           Engine headers
+        └── Lib/Engine.lib
+```
+
+Box3D note: the code is tested against upstream commit `67c92ab`
+("Fix b3PopCount64 for 32-bit x86 targets"); newer `main` contains larger
+physics changes (SIMD hulls, hash rework) that are untested with this package.
+The 32-bit popcount fix matters - without it the Win32 build breaks.
 
 ## Build
 
@@ -55,7 +83,7 @@ directory:
 
 ```powershell
 # ucc make skips recompilation if RagdollPkg.u exists - delete it first
-del ..\System\RagdollPkg.u   # actually: del RagdollPkg.u
+del RagdollPkg.u
 ucc make RagdollPkg
 ```
 
@@ -87,6 +115,30 @@ From the retail `System\`:
 
 Logs land in `<retail>\System\UnrealTournament.log`.
 
+## Configuration
+
+`RagdollPkg.RagdollCarcass` exposes one persisted flag:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `bBoxMannequins` | `false` | When `true`, corpses use the procedural box mannequin (full 14-body skeleton incl. feet, no mesh skinning) even for models that have a real-mesh dataset. When `false` (default), models with a dataset get the real skinned player mesh on a 12-body skeleton; unknown models always fall back to boxes. |
+
+Toggle at runtime from the console:
+
+```console
+set RagdollPkg.RagdollCarcass bBoxMannequins 1   # box mannequins
+set RagdollPkg.RagdollCarcass bBoxMannequins 0   # real skinned meshes
+```
+
+or persistently in `<retail>\System\UnrealTournament.ini`:
+
+```ini
+[RagdollPkg.RagdollCarcass]
+bBoxMannequins=True
+```
+
+The change applies to corpses spawned afterwards; corpses already lying around keep their current skeleton. No recompile needed either way.
+
 ## Tooling
 
 ```powershell
@@ -104,8 +156,12 @@ for how the mesh binding works before touching skinning code.
 
 ## Attribution / license
 
-Built against Epic Games' Unreal Tournament public source distribution headers
-and import libraries. Those files remain property of Epic Games and are provided
-under the terms described in [docs/EPIC-source-notice.md](docs/EPIC-source-notice.md):
-personal, non-profit use only. Everything else in this repo (the `RagdollPkg`
-package, tooling, docs) follows the same terms.
+This repository does **not** distribute any Epic Games source, headers, or
+libraries. Building requires the UT99 public source distribution's Core/Engine
+headers and import libraries (provisioned into `thirdparty/ut99sdk/`), which
+remain property of Epic Games under the terms described in
+[docs/EPIC-source-notice.md](docs/EPIC-source-notice.md): personal, non-profit
+use only. Box3D is MIT licensed, upstream at
+[erincatto/box3d](https://github.com/erincatto/box3d), and is likewise not
+included in this repo. Everything committed here (the `RagdollPkg` package,
+tooling, docs) follows the same personal, non-profit terms.

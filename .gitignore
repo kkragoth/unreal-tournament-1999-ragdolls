@@ -2,6 +2,7 @@ build/
 .vs/
 .vscode/
 System/
+thirdparty/
 *.dll
 *.u
 *.log

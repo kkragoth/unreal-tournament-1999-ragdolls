@@ -13,8 +13,8 @@ Notes for AI agents working in this repo.
   recompilation when the `.u` exists, even if the `.uc` sources are newer.
   - Retail game dir used for development:
     `C:\Users\kkragoth\Downloads\Unreal Tournament\Unreal Tournament\`.
-    If its `RagdollPkg\` folder is not a junction into this repo, create one:
-    `New-Item -ItemType Junction -Path "<retail>\RagdollPkg" -Target "<repo>\RagdollPkg"`.
+    Its `RagdollPkg\` folder IS a junction into THIS repo's `RagdollPkg\`
+    (`...\Ut99PubSrc` is the retired monorepo - do not edit or deploy from it).
   - `ucc make` binds native functions by the DLL export name
     (`intARagdollCarcassexec<Name>`). New native exec functions must be
     built/deployed in the DLL **before** running `ucc make`, or make fails with
@@ -28,11 +28,16 @@ Notes for AI agents working in this repo.
   DM-Deck16][?game=Botpack.DeathMatchPlus?MinPlayers=8?mutator=RagdollPkg.RagdollMutator,RagdollPkg.RagdollTestMutator
   -log` from the retail `System\`. Logs land in `System\UnrealTournament.log`.
 
-## Ragdoll real-mesh skinning (ON; runtime-gated)
+## Ragdoll real-mesh skinning (ON; runtime-toggleable)
 
-Real-mesh skinning is **currently ON** via a runtime check (`bRealMesh` when
-`S->VertBinds.Num() == FrameVerts` in `RagdollPkg\Src\UnRagdollMesh.cpp`); box
-mannequins appear only when the bind data is absent. Read `docs/handoff.md`,
+Real-mesh skinning is the default, gated at runtime by dataset availability
+(`bRealMesh` when `S->VertBinds.Num() == FrameVerts` in
+`RagdollPkg\Src\UnRagdollMesh.cpp`). Box mannequins appear when a model has no
+dataset OR when the class config flag `bBoxMannequins` is true — toggle with
+`set RagdollPkg.RagdollCarcass bBoxMannequins 1|0` (console or ini), no
+recompile. The gate lives in one place per side: `RagdollForceBoxes()` wrapping
+`FindRagdollDataset` in both `RagdollCarcass.cpp` (physics skeleton) and
+`UnRagdollMesh.cpp` (mesh build). Read `docs/handoff.md`,
 `docs/skinning-findings.md`, and `docs/plans/real-mesh.md` before touching this
 feature.
 
