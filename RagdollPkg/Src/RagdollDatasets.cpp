@@ -21,15 +21,21 @@ const FRagdollDatasetEntry* FindRagdollDataset( const TCHAR* LiveMeshName )
 	return NULL;
 }
 
-UBOOL RagdollForceBoxes()
+UBOOL RagdollForceBoxes( UObject* Obj )
 {
 	guard(RagdollForceBoxes);
-	// bBoxMannequins is a globalconfig var on ARagdollCarcass, persisted under
-	// [RagdollPkg.RagdollCarcass] in the game ini. The console "set" command
-	// saves it immediately, so per-spawn reads are always current.
-	FString Ini = FString( appBaseDir() ) + TEXT("UnrealTournament.ini");
-	TCHAR Buf[32] = TEXT("");
-	GConfig->GetString( TEXT("RagdollPkg.RagdollCarcass"), TEXT("bBoxMannequins"), Buf, ARRAY_COUNT(Buf), *Ini );
-	return appStricmp( Buf, TEXT("True") ) == 0 || appAtoi( Buf ) != 0;
+	// Read the live bBoxMannequins value through the script property list.
+	// The console "set" command updates the class default immediately and new
+	// carcasses inherit it at spawn, so this is always current - without
+	// depending on which ini file/path GConfig has cached.
+	if( !Obj )
+		return 0;
+	for( TFieldIterator<UBoolProperty> It( Obj->GetClass() ); It; ++It )
+	{
+		UBoolProperty* P = *It;
+		if( appStricmp( P->GetName(), TEXT("bBoxMannequins") ) == 0 )
+			return ( *(BITFIELD*)( (BYTE*)Obj + P->Offset ) & P->BitMask ) ? 1 : 0;
+	}
+	return 0;
 	unguard;
 }
