@@ -1,0 +1,10 @@
+build/
+.vs/
+.vscode/
+System/
+*.dll
+*.u
+*.log
+*.swp
+__pycache__/
+tools/rig_verify/
