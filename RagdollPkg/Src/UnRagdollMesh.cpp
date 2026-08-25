@@ -187,7 +187,7 @@ URagdollMesh* CreatePlayerRagdollMesh( ARagdollCarcass* Carcass, FRagdollState& 
 	ULodMesh* Src = Cast<ULodMesh>( Carcass ? Carcass->Mesh : NULL );
 	if( !Src )
 		return NULL;
-	const FRagdollDatasetEntry* DS = RagdollForceBoxes( Carcass )
+	const FRagdollDatasetEntry* DS = RagdollForceBoxes()
 		? NULL : FindRagdollDataset( Src->GetName() );
 	if( !DS )
 	{

@@ -4,6 +4,9 @@ Notes for AI agents working in this repo.
 
 ## Build/deploy loop (native + script)
 
+- First checkout only: provision gitignored deps with
+  `.\setup.ps1 -Ut99Src "<UT99 public source tree>"` (adds `thirdparty\ut99sdk`
+  headers/libs and `thirdparty\box3d`; add `-Configure` to configure CMake too).
 - Native-only edits (`.cpp`/`.h`): build `build\RagdollPkg\RagdollPkg.vcxproj`
   with MSBuild `/p:Configuration=Release /p:Platform=Win32
   /p:BuildProjectReferences=false`, then copy `System\RagdollPkg.dll` to the

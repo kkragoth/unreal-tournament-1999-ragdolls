@@ -167,7 +167,7 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	// dataset exists - toggle via ini or the console "set" command.
 	const FRagdollDatasetEntry* DS = NULL;
 	ULodMesh* LiveMesh = Cast<ULodMesh>( C->Mesh );
-	if( LiveMesh && !RagdollForceBoxes( C ) )
+	if( LiveMesh && !RagdollForceBoxes() )
 		DS = FindRagdollDataset( LiveMesh->GetName() );
 	const FRagdollBoneDef* Defs = DS ? DS->Bones : GRagdollBoneDefs;
 	S.BoneDefs = Defs;

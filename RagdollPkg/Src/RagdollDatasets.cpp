@@ -21,10 +21,15 @@ const FRagdollDatasetEntry* FindRagdollDataset( const TCHAR* LiveMeshName )
 	return NULL;
 }
 
-UBOOL RagdollForceBoxes( UObject* Obj )
+UBOOL RagdollForceBoxes()
 {
-	if( !Obj )
-		return 0;
-	const FString V = Obj->GetPropertyText( TEXT("bBoxMannequins") );
-	return appStricmp( *V, TEXT("True") ) == 0 || appAtoi( *V ) != 0;
+	guard(RagdollForceBoxes);
+	// bBoxMannequins is a globalconfig var on ARagdollCarcass, persisted under
+	// [RagdollPkg.RagdollCarcass] in the game ini. The console "set" command
+	// saves it immediately, so per-spawn reads are always current.
+	FString Ini = FString( appBaseDir() ) + TEXT("UnrealTournament.ini");
+	TCHAR Buf[32] = TEXT("");
+	GConfig->GetString( TEXT("RagdollPkg.RagdollCarcass"), TEXT("bBoxMannequins"), Buf, ARRAY_COUNT(Buf), *Ini );
+	return appStricmp( Buf, TEXT("True") ) == 0 || appAtoi( Buf ) != 0;
+	unguard;
 }

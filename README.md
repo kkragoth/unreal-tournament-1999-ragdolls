@@ -24,14 +24,36 @@ thirdparty/            NOT in the repo - provision locally (see below); gitignor
 ```
 
 `thirdparty/` holds two local-only dependencies and is deliberately **not
-tracked in git**:
+tracked in git** (they are Epic Games' files / an external library):
 
 - `thirdparty/ut99sdk/` - Unreal Engine 1 headers (`Core/Inc`, `Engine/Inc`)
   plus prebuilt import libs (`Core/Lib/Core.lib`, `Engine/Lib/Engine.lib`),
-  taken from Epic's UT99 public source distribution. Not redistributable here.
+  taken from Epic's UT99 public source distribution.
 - `thirdparty/box3d/` - [Box3D](https://github.com/erincatto/box3d) physics
-  library source snapshot. Keep upstream out of this repo's history; clone it
-  separately and copy (or use your own fork/submodule).
+  library sources.
+
+## Setup
+
+Provision both in one step with the bundled script:
+
+```powershell
+.\setup.ps1 -Ut99Src "C:\path\to\ut99-public-source"
+```
+
+- `-Ut99Src` - path to your UT99 public source distribution tree (must contain
+  `Core\`, `Engine\` incl. the prebuilt `Core\Lib\Core.lib` / `Engine\Lib\Engine.lib`).
+- `-Box3dSrc <path>` - optional: copy Box3D from an existing checkout instead of
+  cloning from GitHub.
+- `-Configure` - also run the CMake configure afterwards.
+
+The script is idempotent; re-run it to refresh either dependency.
+
+Box3D version note: this project was tested against upstream commit `67c92ab`
+("Fix b3PopCount64 for 32-bit x86 targets" - required for the Win32 build).
+Upstream rewrote its history, so that exact ref may not be fetchable anymore;
+the script then falls back to upstream's default branch with a warning, and
+newer Box3D (SIMD hulls, hash rework) remains untested here. If you have a
+checkout of the tested commit, pass it via `-Box3dSrc`.
 
 ## Prerequisites
 
@@ -40,30 +62,14 @@ tracked in git**:
 - A retail Unreal Tournament installation (provides `Core.dll`, `Engine.dll`,
   `ucc.exe` and the game content at runtime)
 - Python 3 for the tooling (Blender optional, only for rig verification renders)
-- Local `thirdparty/` contents (see above). Expected layout:
-
-```
-thirdparty/
-├── box3d/                 box3d repo checkout (root CMakeLists.txt, src/, include/)
-│   └── ...
-└── ut99sdk/
-    ├── Core/
-    │   ├── Inc/           Core headers from the UT99 public source distribution
-    │   └── Lib/Core.lib
-    └── Engine/
-        ├── Inc/           Engine headers
-        └── Lib/Engine.lib
-```
-
-Box3D note: the code is tested against upstream commit `67c92ab`
-("Fix b3PopCount64 for 32-bit x86 targets"); newer `main` contains larger
-physics changes (SIMD hulls, hash rework) that are untested with this package.
-The 32-bit popcount fix matters - without it the Win32 build breaks.
+- The UT99 public source distribution path, for the one-time `setup.ps1` run
 
 ## Build
 
 ```powershell
-cmake -S . -B build -A Win32
+# one-time thirdparty provisioning (see Setup above)
+.\setup.ps1 -Ut99Src "C:\path\to\ut99-public-source" -Configure
+
 cmake --build build --config Release --target RagdollPkg
 ```
 

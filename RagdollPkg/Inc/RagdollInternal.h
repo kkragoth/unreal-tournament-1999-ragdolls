@@ -154,7 +154,7 @@ const FRagdollDatasetEntry* FindRagdollDataset( const TCHAR* LiveMeshName );
 // overriding any available real-mesh dataset. Toggled at runtime with
 // "set RagdollPkg.RagdollCarcass bBoxMannequins 1" or via UnrealTournament.ini
 // ([RagdollPkg.RagdollCarcass]); affects corpses spawned afterwards.
-UBOOL RagdollForceBoxes( UObject* Obj );
+UBOOL RagdollForceBoxes();
 
 // Real-mesh factory (UnRagdollMesh.cpp). Builds a URagdollMesh from the
 // precomputed dataset for the owning carcass's player mesh (ULodMesh), filling
