@@ -63,7 +63,7 @@ struct FRagdollGeomCollector
 	void AddPolygon( const FVector* Poly, INT NumV, const FPlane& Plane )
 	{
 		// Plane normal points into the room (front face). Use it to wind the
-		// fan triangles so the mesh's single-sided faces face the room.
+		// fan triangles so the mesh's faces face the room.
 		FVector Normal( Plane.X, Plane.Y, Plane.Z );
 
 		const INT Base = Vertices.Num();
@@ -85,6 +85,10 @@ struct FRagdollGeomCollector
 		FLOAT Dot = Cross.x * Normal.X + Cross.y * Normal.Y + Cross.z * Normal.Z;
 		const UBOOL Flip = Dot < 0.0f;
 
+		// Front faces (toward the room). Also emit each polygon BACKWARDS so the
+		// level mesh collides from both sides: a corpse shoved below a thin floor
+		// (or spawning half-embedded) otherwise finds no surface beneath it and
+		// falls through the ground forever.
 		for( INT j=1; j<NumV-1; j++ )
 		{
 			if( Flip )
@@ -98,6 +102,21 @@ struct FRagdollGeomCollector
 				Indices.AddItem( Base );
 				Indices.AddItem( Base + j );
 				Indices.AddItem( Base + j + 1 );
+			}
+		}
+		for( INT j=1; j<NumV-1; j++ )
+		{
+			if( Flip )
+			{
+				Indices.AddItem( Base );
+				Indices.AddItem( Base + j );
+				Indices.AddItem( Base + j + 1 );
+			}
+			else
+			{
+				Indices.AddItem( Base );
+				Indices.AddItem( Base + j + 1 );
+				Indices.AddItem( Base + j );
 			}
 		}
 	}

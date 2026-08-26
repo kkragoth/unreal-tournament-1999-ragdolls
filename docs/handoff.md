@@ -20,6 +20,13 @@ Real-mesh corpses now work end-to-end:
 
 ## ACTIVE: binding rework — region thresholds → proximity (2026-08-09)
 
+**SUPERSEDED 2026-08-25 by `docs/plans/topology-rig.md`**: audits proved the
+meshes are multi-component (whole arms/armor are separate sheets), there are
+ZERO true hand<->leg weld faces (the 58 were classifier artifacts), and
+proximity alone cannot disambiguate hands resting on thighs — the plan is
+connectivity/geodesic segmentation (FPS landmarks + Voronoi labels), not
+proximity. Read that plan before touching `bind_verts`.
+
 The current `bind_verts` uses **region classification** (`fore_idx`/`arm_idx`/
 `leg_idx` from `derive_bones`) to force verts to bones. A color-coded render
 exposed a real bug in that approach, confirmed by the user in Blender:

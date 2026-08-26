@@ -106,11 +106,14 @@ static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FRagdollBone
 
 	if( Spec.Kind == JK_Hinge )
 	{
-		// Revolute joints rotate about the local Z of the joint frame. Orient
-		// the frame so that local Z points along world +Y (the medial-lateral
-		// flexion axis for knees and elbows). Both frames share the hinge
-		// rotation, so the reference (zero) angle is the straight limb pose.
-		b3Quat Hinge = b3MakeQuatFromAxisAngle( { 1.0f, 0.0f, 0.0f }, 1.5707963f );
+		// Revolute joints rotate about the local Z of the joint frame. The bind
+		// space is FRONT-FACING +Y (Mixamo toe bones point +Y), and the arms/legs
+		// hang down at x=±, so the medial-lateral flexion axis is world +X: a
+		// right-hand rotation about +X swings a hanging limb forward (+Y) /
+		// backward (-Y) in the sagittal plane. (World +Y would swing the limb
+		// sideways - that was the "whole arm stiff" bug.) Both frames share the
+		// hinge rotation, so the reference (zero) angle is the straight limb pose.
+		b3Quat Hinge = b3MakeQuatFromAxisAngle( { 0.0f, 1.0f, 0.0f }, 1.5707963f );
 		FrameA.q = Hinge;
 		FrameB.q = Hinge;
 
@@ -125,7 +128,7 @@ static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FRagdollBone
 		J.upperAngle         = Spec.L1;
 		J.enableSpring       = false;
 		J.enableMotor        = true;
-		J.maxMotorTorque     = Spec.Friction * 5.0f;
+		J.maxMotorTorque     = Spec.Friction * 3.0f;
 		J.motorSpeed         = 0.0f;
 		b3CreateRevoluteJoint( S.World, &J );
 	}
@@ -143,9 +146,97 @@ static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FRagdollBone
 		J.upperTwistAngle    = Spec.L2;
 		J.enableSpring       = false;
 		J.enableMotor        = true;
-		J.maxMotorTorque     = Spec.Friction * 5.0f;
+		J.maxMotorTorque     = Spec.Friction * 3.0f;
 		J.motorVelocity      = b3Vec3_zero;
 		b3CreateSphericalJoint( S.World, &J );
+	}
+}
+
+// Pose the freshly-created ragdoll so the corpse resembles the dead pawn
+// instead of a frozen arms-down bind statue:
+//  - yaw: rotate the whole bind skeleton (bind front = +Y) to the pawn's facing;
+//  - aim: raise the arms toward a weapon-aim (upper arm swung forward, forearm
+//    flexed ~20 deg more, head nodded slightly down-range).
+// The pose is a valid joint configuration (shoulder/elbow frames still coincide
+// at their anchors), so the joints hold it and the corpse flops naturally from
+// there. Runs before spawn clearance so embedded-body checks see the posed pose.
+static void ApplyDeathPose( FRagdollState& S, ARagdollCarcass* C, const FVector* Anch )
+{
+	if( !S.bHasDeathPose )
+		return;
+
+	const FLOAT DrawScale = C->DrawScale > 0.0f ? C->DrawScale : 1.0f;
+	const FVector Origin = C->Location;
+	const FRagdollBoneDef* Defs = S.BoneDefs ? S.BoneDefs : GRagdollBoneDefs;
+
+	// Yaw: pawn forward is (cos,sin) of its Yaw (Yaw=0 -> +X); mapping bind +Y
+	// onto that direction is a rotation about Z of (Yaw - 90 deg).
+	const FLOAT YawRad = ( S.SpawnYaw & 65535 ) * ( 2.0f * PI / 65536.0f );
+	const FLOAT Theta  = YawRad - PI / 2.0f;
+	const FLOAT Cy = appCos( Theta ), Sy = appSin( Theta );
+	b3Quat QYaw = b3MakeQuatFromAxisAngle( { 0.0f, 0.0f, 1.0f }, Theta );
+
+	// Aim: base arm raise ~70 deg from vertical; Unreal pitch (positive = up)
+	// adds a little more so high shots pose the arms higher.
+	const FLOAT PitchRad = ( S.SpawnPitch & 65535 ) * ( 2.0f * PI / 65536.0f );
+	FLOAT AimTilt = 1.22f + PitchRad * 0.25f;
+	if( AimTilt > 1.45f ) AimTilt = 1.45f;
+	if( AimTilt < 0.8f )  AimTilt = 0.8f;
+	const FLOAT ElbowFlex = AimTilt + 0.35f;
+
+	// Rotate P about Center around world +X: swings a hanging limb forward (+Y).
+	auto ArmRot = []( const FVector& P, const FVector& Center, FLOAT a ) -> FVector
+	{
+		const FLOAT ca = appCos( a ), sa = appSin( a );
+		const FLOAT dx = P.X - Center.X, dy = P.Y - Center.Y, dz = P.Z - Center.Z;
+		return FVector( Center.X + dx,
+		                Center.Y + dy*ca - dz*sa,
+		                Center.Z + dy*sa + dz*ca );
+	};
+	auto ArmQuat = []( FLOAT a ) -> b3Quat
+	{
+		return b3MakeQuatFromAxisAngle( { 1.0f, 0.0f, 0.0f }, a );
+	};
+
+	for( INT i=0; i<S.NumBodies; i++ )
+	{
+		const FRagdollBoneDef& D = Defs[i];
+		FVector P = Origin + DrawScale * FVector( D.CX, D.CY, D.CZ );
+		b3Quat Q = b3Quat_identity;
+
+		if( i == BONE_UpperArmL || i == BONE_UpperArmR )
+		{
+			const INT SIdx = ( i == BONE_UpperArmL ) ? 3 : 4;    // shoulder anchor
+			const FVector Ash = Origin + DrawScale * Anch[SIdx];
+			P = ArmRot( P, Ash, AimTilt );
+			Q = ArmQuat( AimTilt );
+		}
+		else if( i == BONE_ForearmL || i == BONE_ForearmR )
+		{
+			const INT SIdx = ( i == BONE_ForearmL ) ? 3 : 4;
+			const INT EIdx = ( i == BONE_ForearmL ) ? 5 : 6;     // elbow anchor
+			const FVector Ash = Origin + DrawScale * Anch[SIdx];
+			const FVector Ael = Origin + DrawScale * Anch[EIdx];
+			const FVector Enew = ArmRot( Ael, Ash, AimTilt );    // posed elbow
+			FVector Pf = ArmRot( P, Ash, AimTilt );              // follow shoulder
+			P = ArmRot( Pf, Enew, ElbowFlex );                   // then flex elbow
+			Q = ArmQuat( AimTilt + ElbowFlex );                  // combined rotation
+		}
+		else if( i == BONE_Head )
+		{
+			const FVector AnchN = Origin + DrawScale * Anch[2];  // neck anchor
+			P = ArmRot( P, AnchN, 0.35f );
+			Q = ArmQuat( 0.35f );
+		}
+
+		// Yaw the posed position about the corpse origin; arm pose composes
+		// under the yaw (apply arm first, then yaw).
+		const FVector Dv = P - Origin;
+		P = Origin + FVector( Dv.X*Cy - Dv.Y*Sy, Dv.X*Sy + Dv.Y*Cy, Dv.Z );
+		Q = b3MulQuat( QYaw, Q );
+
+		b3Body_SetTransform( S.Bodies[i],
+			{ P.X*RAGDOLL_U2M, P.Y*RAGDOLL_U2M, P.Z*RAGDOLL_U2M }, Q );
 	}
 }
 
@@ -153,9 +244,18 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 {
 	guard(BuildRagdollImpl);
 	TMap<AActor*,FRagdollState>& Map = GetRagdollStates();
-	FRagdollState& S = Map.Set( C, FRagdollState() );
-	if( S.bBuilt )
+	FRagdollState* Pre = Map.Find( C );
+	if( Pre && Pre->bBuilt )
 		return;
+	// The death pose was stored by SetDeathPose (from Initfor) on a fresh state
+	// entry; Map.Set below overwrites the value, so carry the pose across.
+	const INT   PoseYaw   = Pre ? Pre->SpawnYaw   : 0;
+	const INT   PosePitch = Pre ? Pre->SpawnPitch : 0;
+	const UBOOL bPose     = Pre ? Pre->bHasDeathPose : false;
+	FRagdollState& S = Map.Set( C, FRagdollState() );
+	S.SpawnYaw      = PoseYaw;
+	S.SpawnPitch    = PosePitch;
+	S.bHasDeathPose = bPose;
 
 	FLOAT DrawScale = C->DrawScale > 0.0f ? C->DrawScale : 1.0f;
 	FVector Origin  = C->Location;
@@ -200,14 +300,14 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	{
 		// Mild randomized kick so a stationary corpse still flops, but gentle
 		// enough that the long real-mesh limbs don't flail apart on the drop.
-		DeathVel.X += ( appFrand() * 2.0f - 1.0f ) * 1.0f;
-		DeathVel.Y += ( appFrand() * 2.0f - 1.0f ) * 1.0f;
-		DeathVel.Z += 0.4f;
+		DeathVel.X += ( appFrand() * 2.0f - 1.0f ) * 1.4f;
+		DeathVel.Y += ( appFrand() * 2.0f - 1.0f ) * 1.4f;
+		DeathVel.Z += 0.5f;
 		BaseSpeed = DeathVel.Size();
 	}
 	// Clamp so a fast fall or hit doesn't blast the body out of the world or
-	// off the ground slab.
-	const FLOAT MaxImpulse = 6.0f;
+	// off the ground slab. 8 m/s keeps the killing shot's push visible.
+	const FLOAT MaxImpulse = 8.0f;
 	if( BaseSpeed > MaxImpulse )
 		DeathVel *= MaxImpulse / BaseSpeed;
 
@@ -222,7 +322,7 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 		Bd.position       = { Center.X*RAGDOLL_U2M, Center.Y*RAGDOLL_U2M, Center.Z*RAGDOLL_U2M };
 		Bd.rotation       = b3Quat_identity;
 		Bd.linearDamping  = 0.05f;
-		Bd.angularDamping = 0.6f;
+		Bd.angularDamping = 0.35f;   // floppier than 0.6: limbs keep swinging
 		Bd.gravityScale   = 1.0f;
 		S.Bodies[i] = b3CreateBody( S.World, &Bd );
 
@@ -303,6 +403,9 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 
 	// Lift bodies that spawned inside level geometry (ramp/stairs deaths) so the
 	// first step doesn't explode them. Must run before the first StepRagdoll.
+	// Pose first (arms raised, corpse yawed to the pawn) so clearance sees the
+	// final spawn configuration.
+	ApplyDeathPose( S, C, Anch );
 	ClearCorpseSpawn( S, LW );
 
 	// Player mesh (preferred): capture the dead pawn's ULodMesh and attach it to
@@ -373,9 +476,6 @@ static void SyncRagdollImpl( ARagdollCarcass* C )
 	}
 	S->SyncCount++;
 
-	// The visual is driven entirely by URagdollMesh::GetFrame (world space).
-	// Keep the actor transform on the pelvis for culling/replication/3rd-person
-	// camera heuristics.
 	b3WorldTransform T = b3Body_GetTransform( S->Bodies[BONE_Pelvis] );
 	FVector NewLoc( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
 
@@ -389,8 +489,18 @@ static void SyncRagdollImpl( ARagdollCarcass* C )
 	Coords.ZAxis  = FVector( Z.x, Z.y, Z.z );
 	FRotator NewRot = Coords.OrthoRotation();
 
-	C->Location = NewLoc;
-	C->Rotation = NewRot;
+	// The visual is driven entirely by URagdollMesh::GetFrame (world space).
+	// Keep the actor transform on the pelvis for culling/replication/3rd-person
+	// camera heuristics. Move it through the engine (un-hash, move, re-hash) so
+	// the collision hash tracks the corpse: a raw Location write leaves stale
+	// hash buckets, and SetCollisionSize's un-hash then computes the wrong
+	// bucket and double-hashes the corpse, which eventually corrupts the bucket
+	// chain and crashes FCollisionHash::ActorLineCheck during pawn physics.
+	// bNoFail so the ragdoll's own physics owns world collision (the engine
+	// move is a follow-along teleport, not a push).
+	FCheckResult MoveHit( 1.0f );
+	C->GetLevel()->MoveActor( C, NewLoc - C->Location, NewRot, MoveHit,
+		false, false, false, true );
 
 	// Keep the collision hitbox covering the whole body. The default Carcass
 	// cylinder (radius 18, height 4) is a dot at the pelvis, so shots that
@@ -646,6 +756,19 @@ void ARagdollCarcass::execWalkOverPush( FFrame& Stack, RESULT_DECL )
 		V.y += ( Push.y - V.y ) * 0.35f;
 		b3Body_SetLinearVelocity( S->Bodies[i], V );
 	}
+	unguard;
+}
+
+void ARagdollCarcass::execSetDeathPose( FFrame& Stack, RESULT_DECL )
+{
+	guard(ARagdollCarcass::execSetDeathPose);
+	P_GET_INT( Yaw );
+	P_GET_INT( Pitch );
+	P_FINISH;
+	FRagdollState& S = GetRagdollStates().Set( this, FRagdollState() );
+	S.SpawnYaw      = Yaw;
+	S.SpawnPitch    = Pitch;
+	S.bHasDeathPose = true;
 	unguard;
 }
 

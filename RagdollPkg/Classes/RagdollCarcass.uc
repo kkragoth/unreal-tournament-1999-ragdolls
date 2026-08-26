@@ -29,6 +29,7 @@ native function SyncRagdoll();
 native function ShutdownRagdoll();
 native function ApplyDamageImpulse(vector HitLocation, vector Momentum, int Damage);
 native function WalkOverPush(Pawn Pusher);
+native function SetDeathPose(int Yaw, int Pitch);
 
 // Projectiles and hitscan call TakeDamage on the corpse. We translate the
 // hit into a Box3D impulse on the bodies near the impact point. The base
@@ -73,6 +74,7 @@ function Initfor(actor Other)
 	SetCollisionSize(Other.CollisionRadius + 4, Other.CollisionHeight);
 	Velocity = Other.Velocity;
 	Mass = Other.Mass;
+	SetDeathPose(Pawn(Other).Rotation.Yaw, Pawn(Other).Rotation.Pitch);
 	BuildRagdoll();
 }
 

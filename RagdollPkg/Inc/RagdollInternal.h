@@ -72,14 +72,21 @@ struct FRagdollState
 	UBOOL         bFrameLogged;
 	UBOOL         bFrameRangeLogged;
 	UBOOL         bOutOfWorldLogged;
-	INT           SyncCount;
-	INT           NumBodies;  // bodies actually created (12 real-mesh, 14 box)
+	INT   SyncCount;
+	INT   NumBodies;  // bodies actually created (12 real-mesh, 14 box)
 	b3WorldId     World;   // shared level world (see FRagdollLevelWorld)
 	URagdollMesh* Mesh;
 	b3BodyId      Bodies[RAGDOLL_BONE_COUNT];
 	b3Vec3        RestPositions[RAGDOLL_BONE_COUNT];
 	b3Quat        RestRotations[RAGDOLL_BONE_COUNT];
 	const FRagdollBoneDef* BoneDefs;  // active skeleton (dataset or canonical)
+
+	// Death pose captured from the dying pawn (set by SetDeathPose before
+	// BuildRagdoll): the corpse spawns facing the pawn's yaw with its arms
+	// raised toward the aim pitch instead of frozen in the arms-down bind pose.
+	INT   SpawnYaw;      // dead pawn facing (Unreal units)
+	INT   SpawnPitch;    // dead pawn aim pitch (Unreal units)
+	UBOOL bHasDeathPose;
 
 	// Per-vertex smooth skin data (indexed by mesh vertex); empty in box mode.
 	TArray<FRagdollVertexBind> VertBinds;

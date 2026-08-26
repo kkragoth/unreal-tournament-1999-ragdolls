@@ -32,6 +32,7 @@ public:
     DECLARE_FUNCTION(execBuildRagdoll);
     DECLARE_FUNCTION(execApplyDamageImpulse);
     DECLARE_FUNCTION(execWalkOverPush);
+    DECLARE_FUNCTION(execSetDeathPose);
     DECLARE_CLASS(ARagdollCarcass,ACarcass,0,RagdollPkg)
     NO_DEFAULT_CONSTRUCTOR(ARagdollCarcass)
 };
@@ -44,6 +45,7 @@ AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execStepRagdoll);
 AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execBuildRagdoll);
 AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execApplyDamageImpulse);
 AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execWalkOverPush);
+AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execSetDeathPose);
 
 #ifndef NAMES_ONLY
 #undef AUTOGENERATE_NAME
