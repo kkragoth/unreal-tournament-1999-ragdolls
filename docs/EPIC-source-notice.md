@@ -7,6 +7,12 @@ yourself from the official distribution and place them under
 `thirdparty/ut99sdk/` (see the README). Those files are the property of
 [Epic Games, Inc](http://www.epicgames.com).
 
+A convenient Git mirror of the distribution is maintained at
+[FaultyRAM/Ut99PubSrc](https://github.com/FaultyRAM/Ut99PubSrc). The dev scripts
+in `scripts/` (`scripts/Fetch-Ut99Src.ps1`, `scripts/Setup-Dev.ps1`) clone from
+that mirror by default — any copy of the original Epic distribution also works
+and is covered by the same terms below.
+
 Quoting the original distribution README:
 
 > All files contained here are the property of Epic Games, Inc.

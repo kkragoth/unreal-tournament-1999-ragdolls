@@ -1,10 +1,14 @@
 # One-time environment setup: provisions the gitignored thirdparty/ directory.
 #
 #   .\setup.ps1 -Ut99Src "C:\path\to\ut99-public-source"
+#   # or auto-fetch from GitHub (see scripts/Setup-Dev.ps1):
+#   .\scripts\Setup-Dev.ps1 -Configure
 #
 #   -Ut99Src     Path to an Unreal Tournament '99 public source distribution
 #                tree (must contain Core\Inc, Engine\Inc, Core\Lib\Core.lib,
 #                Engine\Lib\Engine.lib). These Epic files are NOT in this repo.
+#                Any clone of https://github.com/FaultyRAM/Ut99PubSrc satisfies
+#                this. Use scripts/Setup-Dev.ps1 to auto-clone it.
 #   -Box3dSrc    Optional existing Box3D checkout to copy instead of cloning
 #                from GitHub.
 #   -Box3dRef    Ref to check out when cloning (default: the commit this
@@ -14,6 +18,8 @@
 #   -Configure   Also run the CMake configure step afterwards.
 #
 # Idempotent: safe to re-run to refresh thirdparty/.
+# See also: scripts/Fetch-Ut99Src.ps1 (clone/update Ut99PubSrc alone),
+#           scripts/Setup-Dev.ps1 (fetch + setup + configure in one step).
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]

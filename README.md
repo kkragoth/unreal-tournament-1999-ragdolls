@@ -4,6 +4,13 @@ Ragdoll death physics for Unreal Tournament '99 (v436), implemented as a native
 Unreal package (`RagdollPkg`) on top of the [Box3D](https://github.com/erincatto/box3d)
 physics library.
 
+> **UT99 public source:** the Unreal Tournament '99 public source distribution
+> required to build this project is mirrored at
+> **[FaultyRAM/Ut99PubSrc](https://github.com/FaultyRAM/Ut99PubSrc)**
+> (original Epic Games distribution, personal non-profit use only — see
+> [docs/EPIC-source-notice.md](docs/EPIC-source-notice.md)). The dev scripts
+> below can clone it for you automatically.
+
 - Corpses are 12-body articulated rigid bodies (pelvis/spine/neck/head, arms,
   legs; feet skipped and bound to shins) with hinge joints and per-bone damage
   impulses — shooting a limb shoves it.
@@ -34,7 +41,42 @@ tracked in git** (they are Epic Games' files / an external library):
 
 ## Setup
 
-Provision both in one step with the bundled script:
+### Quick start — auto-fetch UT99 source from GitHub
+
+One command clones [FaultyRAM/Ut99PubSrc](https://github.com/FaultyRAM/Ut99PubSrc),
+provisions `thirdparty/`, and configures the build:
+
+```powershell
+# clone Ut99PubSrc to thirdparty\_cache\Ut99PubSrc (gitignored), provision + configure
+.\scripts\Setup-Dev.ps1 -Configure
+
+# use an existing Ut99PubSrc checkout, or a custom cache location
+.\scripts\Setup-Dev.ps1 -Ut99Src "C:\path\to\Ut99PubSrc" -Configure
+.\scripts\Setup-Dev.ps1 -Ut99SrcDir "D:\cache\Ut99PubSrc" -Configure
+
+# deploy straight into a retail install's System\ (skips the manual copy step)
+.\scripts\Setup-Dev.ps1 -Configure -GameSystemDir "C:\Unreal Tournament\System"
+```
+
+What it does: [`scripts/Setup-Dev.ps1`](scripts/Setup-Dev.ps1) calls
+[`scripts/Fetch-Ut99Src.ps1`](scripts/Fetch-Ut99Src.ps1) to `git clone` /
+`git pull` the public source if you did not pass `-Ut99Src`, then forwards to
+`setup.ps1` to populate `thirdparty/ut99sdk` and `thirdparty/box3d`.
+
+To only fetch/update the source without provisioning:
+
+```powershell
+.\scripts\Fetch-Ut99Src.ps1                # -> thirdparty\_cache\Ut99PubSrc
+.\scripts\Fetch-Ut99Src.ps1 -Destination "C:\dev\Ut99PubSrc" -Branch master
+```
+
+`Fetch-Ut99Src.ps1` is idempotent — re-run it to `git pull` the latest source.
+
+### Manual setup — existing UT99 source checkout
+
+If you already have the UT99 public source tree locally (from
+[FaultyRAM/Ut99PubSrc](https://github.com/FaultyRAM/Ut99PubSrc) or elsewhere),
+provision both dependencies in one step with the bundled script:
 
 ```powershell
 .\setup.ps1 -Ut99Src "C:\path\to\ut99-public-source"
@@ -42,6 +84,7 @@ Provision both in one step with the bundled script:
 
 - `-Ut99Src` - path to your UT99 public source distribution tree (must contain
   `Core\`, `Engine\` incl. the prebuilt `Core\Lib\Core.lib` / `Engine\Lib\Engine.lib`).
+  Any clone of https://github.com/FaultyRAM/Ut99PubSrc satisfies this.
 - `-Box3dSrc <path>` - optional: copy Box3D from an existing checkout instead of
   cloning from GitHub.
 - `-Configure` - also run the CMake configure afterwards.
@@ -62,13 +105,17 @@ checkout of the tested commit, pass it via `-Box3dSrc`.
 - A retail Unreal Tournament installation (provides `Core.dll`, `Engine.dll`,
   `ucc.exe` and the game content at runtime)
 - Python 3 for the tooling (Blender optional, only for rig verification renders)
-- The UT99 public source distribution path, for the one-time `setup.ps1` run
+- The UT99 public source distribution — **no manual download required**:
+  `scripts/Setup-Dev.ps1` auto-clones https://github.com/FaultyRAM/Ut99PubSrc
+  on first run (or pass an existing checkout via `-Ut99Src` / `setup.ps1 -Ut99Src`)
 
 ## Build
 
 ```powershell
-# one-time thirdparty provisioning (see Setup above)
-.\setup.ps1 -Ut99Src "C:\path\to\ut99-public-source" -Configure
+# one-time thirdparty provisioning (see Setup above) — either:
+.\scripts\Setup-Dev.ps1 -Configure                          # auto-fetch Ut99PubSrc from GitHub
+# or
+.\setup.ps1 -Ut99Src "C:\path\to\ut99-public-source" -Configure  # existing checkout
 
 cmake --build build --config Release --target RagdollPkg
 ```
@@ -167,7 +214,10 @@ libraries. Building requires the UT99 public source distribution's Core/Engine
 headers and import libraries (provisioned into `thirdparty/ut99sdk/`), which
 remain property of Epic Games under the terms described in
 [docs/EPIC-source-notice.md](docs/EPIC-source-notice.md): personal, non-profit
-use only. Box3D is MIT licensed, upstream at
+use only. A convenient Git mirror of that distribution is maintained at
+[FaultyRAM/Ut99PubSrc](https://github.com/FaultyRAM/Ut99PubSrc) — the dev
+scripts in [`scripts/`](scripts/) clone from there by default, but any copy of
+the original Epic distribution works. Box3D is MIT licensed, upstream at
 [erincatto/box3d](https://github.com/erincatto/box3d), and is likewise not
 included in this repo. Everything committed here (the `RagdollPkg` package,
 tooling, docs) follows the same personal, non-profit terms.
