@@ -1,5 +1,10 @@
 # Handoff (2026-10-10, evening) — gore system in, two things the user wants changed
 
+> SUPERSEDED by `docs/handoff-2026-10-10-next.md` (end of day): planar cuts
+> were implemented, then gated behind `bPlanarCuts` (default off) after the
+> playtest; the next work is per-model joints and self-collision. This file
+> is kept for the original feedback and the per-model rigging design notes.
+
 You are continuing work on `C:\Users\kkragoth\dev\unreal-tournament-1999-ragdolls`
 (UT99 Box3D ragdoll mod, native `RagdollPkg`). Read `AGENTS.md` first (build /
 deploy loop, gore section), then `docs/plans/gore.md` section 6
