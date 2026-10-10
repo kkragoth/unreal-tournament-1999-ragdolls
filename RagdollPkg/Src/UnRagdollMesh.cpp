@@ -322,7 +322,7 @@ void URagdollMesh::GetFrame( FVector* Verts, INT Size, FCoords Coords, AActor* O
 				{
 					if( B.Weight[k] <= 0.0f )
 						break;
-					b3WorldTransform T = b3Body_GetTransform( S->Bodies[B.Bone[k]] );
+					b3WorldTransform T = b3Body_GetTransform( RagdollBody( *S, B.Bone[k] ) );
 					FVector Center( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
 					b3Vec3 Rot = b3RotateVector( T.q, { B.Off[k].X * DrawScale, B.Off[k].Y * DrawScale, B.Off[k].Z * DrawScale } );
 					Pos += ( Center + FVector( Rot.x, Rot.y, Rot.z ) ) * B.Weight[k];
@@ -399,7 +399,7 @@ void URagdollMesh::GetFrame( FVector* Verts, INT Size, FCoords Coords, AActor* O
 					break;
 				INT Bone = B.Bone[k];
 				FVector Off = B.Off[k];
-				b3WorldTransform T = b3Body_GetTransform( S->Bodies[Bone] );
+				b3WorldTransform T = b3Body_GetTransform( RagdollBody( *S, Bone ) );
 				FVector Center( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
 				b3Vec3 Rot = b3RotateVector( T.q, { Off.X * DrawScale, Off.Y * DrawScale, Off.Z * DrawScale } );
 				Pos += ( Center + FVector( Rot.x, Rot.y, Rot.z ) ) * B.Weight[k];
@@ -582,6 +582,13 @@ FBox URagdollMesh::GetRenderBoundingBox( const AActor* Owner, UBOOL Exact )
 			b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
 			FVector C( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
 			FLOAT R = 30.0f * DrawScale;
+			Box += FBox( C - FVector( R, R, R ), C + FVector( R, R, R ) );
+		}
+		for( INT e=0; e<S->NumExtra; e++ )
+		{
+			b3WorldTransform T = b3Body_GetTransform( S->ExtraBodies[e] );
+			FVector C( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
+			FLOAT R = Max( S->ExtraRadius[e], 10.0f ) * DrawScale;
 			Box += FBox( C - FVector( R, R, R ), C + FVector( R, R, R ) );
 		}
 		return Box;

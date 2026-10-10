@@ -243,6 +243,17 @@ the first playtest.
   2-3 parts off and a point-blank overkill scatters everything (headless:
   51 dmg -> 2/11, 83 -> 4, 115 -> 5, 199 -> 7). Detached islands are
   blasted radially (4..11.5 m/s with damage), the trunk only at 35%.
+  **Fragmentation** (`RagdollFragmentBody`): bodies torn off by the blast
+  shatter further. The head splits into 3 chunks, the torso into 3 (4 at
+  >= 150 damage), the pelvis into 2 once at least half the joints are gone
+  and Frac >= 0.6, a torn thigh into 2 with 50% chance at >= 120 damage.
+  A chunk is a k-means partition of the body's skin vertices in bind space;
+  chunk 0 keeps the original body (so joints and the pelvis actor anchor
+  stay valid) and every other chunk gets a new Box3D box body (extras,
+  `RAGDOLL_MAX_EXTRA` = 24, bone index >= 14, parent's transform/velocity,
+  hull 80% of the chunk bounds, mass = parent / K). A second island-closure
+  pass caps the chunk seams. Headless at 199 damage: 7 extra bodies, 18
+  pieces, 1292 -> 1956 verts, 2568 -> 3790 faces.
   `Gib` returns the joints still intact; only a fully scattered corpse sets
   `bGibbed` / `LifeSpan=20`, otherwise `CumulativeDamage` and the part
   damage reset so later hits keep gibbing the trunk. On top: `UT_BigBloodHit`,

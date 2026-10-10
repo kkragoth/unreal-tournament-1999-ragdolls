@@ -671,6 +671,9 @@ static void ShutdownRagdollImpl( ARagdollCarcass* C )
 			for( INT i=0; i<S->NumBodies; i++ )
 				if( S->Alive[i] && b3Body_IsValid( S->Bodies[i] ) )
 					b3DestroyBody( S->Bodies[i] );
+			for( INT e=0; e<S->NumExtra; e++ )
+				if( b3Body_IsValid( S->ExtraBodies[e] ) )
+					b3DestroyBody( S->ExtraBodies[e] );
 		}
 		S->bBuilt = false;
 		debugf( TEXT("RagdollPkg: ShutdownRagdoll actor=%s"), C->GetName() );
@@ -1116,20 +1119,52 @@ void ARagdollCarcass::execGib( FFrame& Stack, RESULT_DECL )
 	Want = Clamp( Want, Min( 2, NumCand ), NumCand );
 
 	INT NumCut = 0;
+	UBOOL CutNow[RAGDOLL_BONE_COUNT];
+	for( INT b=0; b<RAGDOLL_BONE_COUNT; b++ )
+		CutNow[b] = 0;
 	for( INT i=0; i<Want; i++ )
 		if( DetachBody( *S, Cand[i] ) )
+		{
+			CutNow[Cand[i]] = 1;
 			NumCut++;
+		}
 	RagdollSplitIslands( *S );
 
-	const FLOAT Base = 4.0f + Min( Max( Damage, 0 ), 250 ) * 0.03f;   // 4..11.5 m/s
-	for( INT b=0; b<S->NumBodies; b++ )
+	// Fragmentation: bodies torn off by THIS blast shatter further - the
+	// head into 3 chunks, the torso into 3 (4 on heavy damage), a thigh into
+	// 2 on heavy damage - and the pelvis splits in two once most of the
+	// corpse is gone. Chunk 0 keeps the original body, so joints and the
+	// actor location (pelvis) stay valid.
 	{
-		if( !S->Alive[b] )
+		const FLOAT DS = ( DrawScale > 0.0f ) ? DrawScale : 1.0f;
+		INT Frag = 0;
+		if( CutNow[BONE_Head] && S->Alive[BONE_Head] )
+			Frag += RagdollFragmentBody( *S, BONE_Head, 3, DS );
+		if( CutNow[BONE_Spine] )
+			Frag += RagdollFragmentBody( *S, BONE_Spine, Damage >= 150 ? 4 : 3, DS );
+		if( Frac >= 0.6f && NumCut >= NumCand / 2 )
+			Frag += RagdollFragmentBody( *S, BONE_Pelvis, 2, DS );
+		if( Damage >= 120 )
+		{
+			if( CutNow[BONE_ThighL] && appFrand() < 0.5f )
+				Frag += RagdollFragmentBody( *S, BONE_ThighL, 2, DS );
+			if( CutNow[BONE_ThighR] && appFrand() < 0.5f )
+				Frag += RagdollFragmentBody( *S, BONE_ThighR, 2, DS );
+		}
+		if( Frag > 0 )
+			RagdollSplitIslands( *S );
+	}
+
+	const FLOAT Base = 4.0f + Min( Max( Damage, 0 ), 250 ) * 0.03f;   // 4..11.5 m/s
+	for( INT b=0; b<RagdollNumBones( *S ); b++ )
+	{
+		if( !RagdollBoneAlive( *S, b ) )
 			continue;
 		// The trunk (whatever is still joined to the pelvis) is heavy and
-		// stays roughly put; detached islands fly.
+		// stays roughly put; detached islands and fragments fly.
 		const FLOAT Weight = ( RagdollIslandRoot( *S, b ) == BONE_Pelvis ) ? 0.35f : 1.0f;
-		b3WorldTransform T = b3Body_GetTransform( S->Bodies[b] );
+		const b3BodyId Bid = RagdollBody( *S, b );
+		b3WorldTransform T = b3Body_GetTransform( Bid );
 		b3Vec3 Dir = { T.p.x - Hit.x, T.p.y - Hit.y, T.p.z - Hit.z };
 		FLOAT L = sqrt( Dir.x*Dir.x + Dir.y*Dir.y + Dir.z*Dir.z );
 		if( L < 0.05f )
@@ -1142,18 +1177,18 @@ void ARagdollCarcass::execGib( FFrame& Stack, RESULT_DECL )
 		Dir.z += 0.45f;   // bias upward so parts arc instead of skidding
 		const FLOAT Spd = Base * ( 0.7f + appFrand() * 0.6f ) * Weight;
 		b3Vec3 DeltaV = { Dir.x * Spd, Dir.y * Spd, Dir.z * Spd };
-		b3Vec3 V = b3Body_GetLinearVelocity( S->Bodies[b] );
+		b3Vec3 V = b3Body_GetLinearVelocity( Bid );
 		V.x += DeltaV.x; V.y += DeltaV.y; V.z += DeltaV.z;
-		b3Body_SetLinearVelocity( S->Bodies[b], V );
+		b3Body_SetLinearVelocity( Bid, V );
 		b3Vec3 W;
 		W.x = ( appFrand() * 2.0f - 1.0f ) * 9.0f * Weight;
 		W.y = ( appFrand() * 2.0f - 1.0f ) * 9.0f * Weight;
 		W.z = ( appFrand() * 2.0f - 1.0f ) * 9.0f * Weight;
-		b3Body_SetAngularVelocity( S->Bodies[b], W );
+		b3Body_SetAngularVelocity( Bid, W );
 	}
 	const INT Remaining = NumCand - NumCut;
 	*(INT*)Result = Remaining;
-	debugf( TEXT("RagdollPkg: gib %s dmg=%i cut=%i/%i remaining=%i base=%.1f m/s"), GetName(), Damage, NumCut, NumCand, Remaining, Base );
+	debugf( TEXT("RagdollPkg: gib %s dmg=%i cut=%i/%i remaining=%i fragments=%i base=%.1f m/s"), GetName(), Damage, NumCut, NumCand, Remaining, S->NumExtra, Base );
 	unguard;
 }
 

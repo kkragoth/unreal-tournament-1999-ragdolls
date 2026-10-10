@@ -61,6 +61,8 @@ const INT GRagdollBoneParent[RAGDOLL_BONE_COUNT] =
 
 INT RagdollIslandRoot( const FRagdollState& S, INT Body )
 {
+	if( Body >= RAGDOLL_BONE_COUNT )
+		return Body;   // fragments are always their own island
 	INT b = Body;
 	while( b >= 0 && b < RAGDOLL_BONE_COUNT && !S.Cut[b] && GRagdollBoneParent[b] >= 0 )
 		b = GRagdollBoneParent[b];
@@ -69,6 +71,8 @@ INT RagdollIslandRoot( const FRagdollState& S, INT Body )
 
 UBOOL RagdollInSubtree( INT Body, INT Ancestor )
 {
+	if( Body >= RAGDOLL_BONE_COUNT )
+		return 0;
 	INT b = Body;
 	while( b >= 0 )
 	{
@@ -77,6 +81,39 @@ UBOOL RagdollInSubtree( INT Body, INT Ancestor )
 		b = GRagdollBoneParent[b];
 	}
 	return 0;
+}
+
+INT RagdollNumBones( const FRagdollState& S )
+{
+	return RAGDOLL_BONE_COUNT + S.NumExtra;
+}
+
+b3BodyId RagdollBody( const FRagdollState& S, INT Bone )
+{
+	if( Bone >= RAGDOLL_BONE_COUNT )
+	{
+		const INT e = Bone - RAGDOLL_BONE_COUNT;
+		return ( e < S.NumExtra ) ? S.ExtraBodies[e] : b3_nullBodyId;
+	}
+	return ( Bone >= 0 && Bone < RAGDOLL_BONE_COUNT ) ? S.Bodies[Bone] : b3_nullBodyId;
+}
+
+UBOOL RagdollBoneAlive( const FRagdollState& S, INT Bone )
+{
+	if( Bone >= RAGDOLL_BONE_COUNT )
+		return ( Bone - RAGDOLL_BONE_COUNT ) < S.NumExtra;
+	return Bone >= 0 && Bone < S.NumBodies && S.Alive[Bone];
+}
+
+FVector RagdollBoneCenter( const FRagdollState& S, INT Bone )
+{
+	if( Bone >= RAGDOLL_BONE_COUNT )
+	{
+		const INT e = Bone - RAGDOLL_BONE_COUNT;
+		return ( e < S.NumExtra ) ? S.ExtraCenter[e] : FVector( 0, 0, 0 );
+	}
+	const FRagdollBoneDef* Defs = S.BoneDefs ? S.BoneDefs : GRagdollBoneDefs;
+	return FVector( Defs[Bone].CX, Defs[Bone].CY, Defs[Bone].CZ );
 }
 
 /*-----------------------------------------------------------------------------
@@ -228,17 +265,16 @@ static void RefreshMeshTables( URagdollMesh* Mesh, INT NumVerts )
 
 static FVector BoneCenter( const FRagdollState& S, INT Bone )
 {
-	const FRagdollBoneDef* Defs = S.BoneDefs ? S.BoneDefs : GRagdollBoneDefs;
-	return FVector( Defs[Bone].CX, Defs[Bone].CY, Defs[Bone].CZ );
+	return RagdollBoneCenter( S, Bone );
 }
 
 static INT NearestBoneInIsland( const FRagdollState& S, const INT* Island, INT I, const FVector& P )
 {
 	INT Best = -1;
 	FLOAT BestD = 1e30f;
-	for( INT b=0; b<S.NumBodies; b++ )
+	for( INT b=0; b<RagdollNumBones( S ); b++ )
 	{
-		if( !S.Alive[b] || Island[b] != I )
+		if( !RagdollBoneAlive( S, b ) || Island[b] != I )
 			continue;
 		FLOAT D = FDistSquared( P, BoneCenter( S, b ) );
 		if( D < BestD ) { BestD = D; Best = b; }
@@ -288,9 +324,9 @@ void RagdollSplitIslands( FRagdollState& S )
 		return;
 	URagdollMesh* Mesh = S.Mesh;
 
-	INT Island[RAGDOLL_BONE_COUNT];
-	for( INT b=0; b<RAGDOLL_BONE_COUNT; b++ )
-		Island[b] = ( b < S.NumBodies && S.Alive[b] ) ? RagdollIslandRoot( S, b ) : -1;
+	INT Island[RAGDOLL_MAX_BONES];
+	for( INT b=0; b<RAGDOLL_MAX_BONES; b++ )
+		Island[b] = RagdollBoneAlive( S, b ) ? RagdollIslandRoot( S, b ) : -1;
 
 	const INT NumV0 = Mesh->FrameVerts;
 	const INT NumF0 = Mesh->Faces.Num();
@@ -491,6 +527,157 @@ void RagdollSplitIslands( FRagdollState& S )
 	S.NumSplits++;
 	debugf( TEXT("RagdollPkg: SplitIslands #%i seam=%i caps=%i verts %i->%i faces %i->%i wedges %i->%i"),
 		S.NumSplits, NumSeam, NumCaps, NumV0, Mesh->FrameVerts, NumF0, Mesh->Faces.Num(), NumW0, Mesh->Wedges.Num() );
+	unguard;
+}
+
+/*-----------------------------------------------------------------------------
+	Fragmentation (torso / head into several chunks).
+-----------------------------------------------------------------------------*/
+
+INT RagdollFragmentBody( FRagdollState& S, INT Body, INT K, FLOAT DrawScale )
+{
+	guard(RagdollFragmentBody);
+	if( !S.bBuilt || !MeshIsSkinned( S ) || Body < 0 || Body >= S.NumBodies || !S.Alive[Body] || K < 2 )
+		return 0;
+	if( S.NumExtra + K - 1 > RAGDOLL_MAX_EXTRA )
+		K = RAGDOLL_MAX_EXTRA - S.NumExtra + 1;
+	if( K < 2 )
+		return 0;
+
+	// Vertices dominated by this body.
+	TArray<INT> V;
+	for( INT v=0; v<S.VertBinds.Num(); v++ )
+		if( S.VertBinds( v ).Bone[0] == Body && S.VertBinds( v ).Weight[0] > 0.0f )
+			V.AddItem( v );
+	if( V.Num() < K * 6 )
+		return 0;
+
+	// K-means on bind positions: random distinct seeds, a few Lloyd steps.
+	FVector Seed[RAGDOLL_MAX_EXTRA + 1];
+	INT     Count[RAGDOLL_MAX_EXTRA + 1];
+	FVector Sum[RAGDOLL_MAX_EXTRA + 1];
+	for( INT k=0; k<K; k++ )
+	{
+		INT Pick = V( appRand() % V.Num() );
+		Seed[k] = S.BindPos( Pick );
+		if( k > 0 )
+			Seed[k] += FVector( appFrand() - 0.5f, appFrand() - 0.5f, appFrand() - 0.5f ) * 0.5f;   // never identical
+	}
+	TArray<INT> Label;
+	Label.AddZeroed( V.Num() );
+	for( INT Iter=0; Iter<6; Iter++ )
+	{
+		for( INT k=0; k<K; k++ ) { Count[k] = 0; Sum[k] = FVector( 0, 0, 0 ); }
+		for( INT i=0; i<V.Num(); i++ )
+		{
+			const FVector P = S.BindPos( V( i ) );
+			INT Best = 0;
+			FLOAT BestD = 1e30f;
+			for( INT k=0; k<K; k++ )
+			{
+				FLOAT D = FDistSquared( P, Seed[k] );
+				if( D < BestD ) { BestD = D; Best = k; }
+			}
+			Label( i ) = Best;
+			Count[Best]++;
+			Sum[Best] += P;
+		}
+		for( INT k=0; k<K; k++ )
+		{
+			if( Count[k] > 0 )
+				Seed[k] = Sum[k] / (FLOAT)Count[k];
+			else
+				Seed[k] = S.BindPos( V( appRand() % V.Num() ) );   // re-seed an empty cluster
+		}
+	}
+	for( INT k=0; k<K; k++ )
+		if( Count[k] == 0 )
+			return 0;   // degenerate partition; leave the body whole
+
+	// Chunk 0 keeps the existing body. Every other chunk gets a box body sized
+	// to its bind-space bounds, placed by the parent's current transform.
+	const b3WorldTransform PT = b3Body_GetTransform( S.Bodies[Body] );
+	const b3Vec3 PV = b3Body_GetLinearVelocity( S.Bodies[Body] );
+	const b3Vec3 PW = b3Body_GetAngularVelocity( S.Bodies[Body] );
+	const FLOAT  ParentMass = b3Body_GetMass( S.Bodies[Body] );
+	const FVector ParentC = RagdollBoneCenter( S, Body );
+	INT Made = 0;
+	for( INT k=1; k<K; k++ )
+	{
+		FVector Mn( 1e30f, 1e30f, 1e30f ), Mx( -1e30f, -1e30f, -1e30f );
+		for( INT i=0; i<V.Num(); i++ )
+		{
+			if( Label( i ) != k )
+				continue;
+			const FVector& P = S.BindPos( V( i ) );
+			Mn.X = Min( Mn.X, P.X ); Mn.Y = Min( Mn.Y, P.Y ); Mn.Z = Min( Mn.Z, P.Z );
+			Mx.X = Max( Mx.X, P.X ); Mx.Y = Max( Mx.Y, P.Y ); Mx.Z = Max( Mx.Z, P.Z );
+		}
+		const FVector C = ( Mn + Mx ) * 0.5f;
+		FVector H = ( Mx - Mn ) * 0.5f * 0.8f;   // skin is a shell; keep the hull a bit inside it
+		H.X = Max( H.X, 1.5f ); H.Y = Max( H.Y, 1.5f ); H.Z = Max( H.Z, 1.5f );
+
+		// World placement: parent centre + parent rotation * (bind offset).
+		const FVector Rel = ( C - ParentC ) * DrawScale * RAGDOLL_U2M;
+		const b3Vec3 Wp = b3Add( PT.p, b3RotateVector( PT.q, { Rel.X, Rel.Y, Rel.Z } ) );
+
+		b3BodyDef Bd = b3DefaultBodyDef();
+		Bd.type            = b3_dynamicBody;
+		Bd.position        = Wp;
+		Bd.rotation        = PT.q;
+		Bd.linearVelocity  = PV;
+		Bd.angularVelocity = PW;
+		Bd.linearDamping   = 0.05f;
+		Bd.angularDamping  = 0.3f;
+		Bd.gravityScale    = 1.0f;
+		b3BodyId Id = b3CreateBody( S.World, &Bd );
+		if( B3_IS_NULL( Id ) )
+			break;
+		const FLOAT HX = H.X * DrawScale * RAGDOLL_U2M, HY = H.Y * DrawScale * RAGDOLL_U2M, HZ = H.Z * DrawScale * RAGDOLL_U2M;
+		b3ShapeDef Sd = b3DefaultShapeDef();
+		Sd.density = ( ParentMass / K ) / ( 8.0f * HX * HY * HZ );
+		Sd.baseMaterial.friction    = 0.6f;
+		Sd.baseMaterial.restitution = 0.05f;
+		Sd.filter.categoryBits      = RAGDOLL_BODY_CATEGORY;
+		b3BoxHull Hull = b3MakeBoxHull( HX, HY, HZ );
+		b3CreateHullShape( Id, &Sd, &Hull.base );
+
+		const INT e = S.NumExtra++;
+		S.ExtraBodies[e] = Id;
+		S.ExtraCenter[e] = C;
+		S.ExtraRadius[e] = Max( Max( H.X, H.Y ), H.Z ) * 1.5f;
+		const INT Bone = RAGDOLL_BONE_COUNT + e;
+
+		// Re-bind the chunk's vertices rigidly to the new body.
+		for( INT i=0; i<V.Num(); i++ )
+		{
+			if( Label( i ) != k )
+				continue;
+			FRagdollVertexBind& B = S.VertBinds( V( i ) );
+			for( INT w=0; w<3; w++ )
+			{
+				B.Bone[w]   = Bone;
+				B.Off[w]    = FVector( 0, 0, 0 );
+				B.Weight[w] = 0.0f;
+			}
+			B.Off[0]    = S.BindPos( V( i ) ) - C;
+			B.Weight[0] = 1.0f;
+		}
+		Made++;
+	}
+	// Chunk 0: drop any leftover cross weights so it is rigid on the parent.
+	for( INT i=0; i<V.Num(); i++ )
+	{
+		if( Label( i ) != 0 )
+			continue;
+		FRagdollVertexBind& B = S.VertBinds( V( i ) );
+		for( INT w=1; w<3; w++ )
+			B.Weight[w] = 0.0f;
+		B.Off[0]    = S.BindPos( V( i ) ) - ParentC;
+		B.Weight[0] = 1.0f;
+	}
+	debugf( TEXT("RagdollPkg: fragment body=%i verts=%i K=%i made=%i extras=%i"), Body, V.Num(), K, Made, S.NumExtra );
+	return Made;
 	unguard;
 }
 

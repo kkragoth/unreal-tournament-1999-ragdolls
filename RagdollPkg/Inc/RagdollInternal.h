@@ -35,6 +35,13 @@ struct FRagdollBoneDef
 
 #define RAGDOLL_BONE_COUNT 14
 
+// Extra "fragment" bodies created when a gib splits a body's skin into
+// several chunks (RagdollFragmentBody). Vertex bind bone indices >=
+// RAGDOLL_BONE_COUNT address them; every helper that maps a bone index to a
+// Box3D body / bind centre goes through RagdollBody / RagdollBoneCenter.
+#define RAGDOLL_MAX_EXTRA 24
+#define RAGDOLL_MAX_BONES ( RAGDOLL_BONE_COUNT + RAGDOLL_MAX_EXTRA )
+
 enum ERagdollBone
 {
 	BONE_Pelvis     = 0,
@@ -106,12 +113,25 @@ struct FRagdollState
 	INT       CapMaterial;
 	INT       NumSplits;      // how many times the mesh has been re-split (diagnostics)
 
+	// Fragment bodies (see RAGDOLL_MAX_EXTRA). ExtraCenter is the fragment's
+	// bind-space centre (UU, DrawScale=1), ExtraRadius its bounding radius.
+	INT       NumExtra;
+	b3BodyId  ExtraBodies[RAGDOLL_MAX_EXTRA];
+	FVector   ExtraCenter[RAGDOLL_MAX_EXTRA];
+	FLOAT     ExtraRadius[RAGDOLL_MAX_EXTRA];
+
 	FRagdollState()
 	: bBuilt( 0 ), bFrameLogged( 0 ), bFrameRangeLogged( 0 ), bOutOfWorldLogged( 0 )
 	, SyncCount( 0 ), NumBodies( 0 ), World( b3_nullWorldId ), Mesh( NULL ), BoneDefs( NULL )
 	, SpawnYaw( 0 ), SpawnPitch( 0 ), bHasDeathPose( 0 )
-	, Dataset( NULL ), CapMaterial( -1 ), NumSplits( 0 )
+	, Dataset( NULL ), CapMaterial( -1 ), NumSplits( 0 ), NumExtra( 0 )
 	{
+		for( INT e=0; e<RAGDOLL_MAX_EXTRA; e++ )
+		{
+			ExtraBodies[e] = b3_nullBodyId;
+			ExtraCenter[e] = FVector( 0, 0, 0 );
+			ExtraRadius[e] = 0.0f;
+		}
 		for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
 		{
 			Bodies[i]        = b3_nullBodyId;
@@ -134,6 +154,21 @@ INT RagdollIslandRoot( const FRagdollState& S, INT Body );
 
 // True when 'Body' is 'Ancestor' or hangs below it in the bone tree.
 UBOOL RagdollInSubtree( INT Body, INT Ancestor );
+
+// Bone index -> Box3D body / liveness / bind-space centre, covering both the
+// skeleton bodies (< RAGDOLL_BONE_COUNT) and the fragment bodies.
+INT      RagdollNumBones( const FRagdollState& S );
+b3BodyId RagdollBody( const FRagdollState& S, INT Bone );
+UBOOL    RagdollBoneAlive( const FRagdollState& S, INT Bone );
+FVector  RagdollBoneCenter( const FRagdollState& S, INT Bone );
+
+// Split the skin bound to 'Body' into K chunks (k-means on bind positions):
+// chunk 0 keeps the existing body, every other chunk gets a new box body at
+// its place in the world with the parent's velocity. Call after
+// RagdollSplitIslands (so the body's vertices are single-bone) and run
+// RagdollSplitIslands again afterwards to close the new seams. Returns the
+// number of fragment bodies created.
+INT RagdollFragmentBody( FRagdollState& S, INT Body, INT K, FLOAT DrawScale );
 
 // Shared level geometry world: ONE Box3D world per level that holds the level
 // BSP baked into a static triangle mesh plus every ragdoll's bodies/joints.
