@@ -1,5 +1,11 @@
 # RagdollPkg Real-Mesh Skin — Handoff
 
+> 2026-10-10: binding source is now `docs/tpose-rig-workflow.md`
+> (`tools/tpose_rig.py`, Blender bone-heat weights on a T-posed mesh).
+> Everything below about `bind_verts`, region thresholds, topo segmentation
+> and the Mixamo rigs is history; the game dir paths in here are stale too
+> (see AGENTS.md).
+
 Status date: 2026-08-09. Read this first, then the relevant section in
 `docs-skinning-findings.md` and `AGENTS.md` before doing anything.
 

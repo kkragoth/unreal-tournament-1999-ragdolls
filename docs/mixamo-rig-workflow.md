@@ -1,4 +1,9 @@
-# Mixamo rig workflow — handoff
+# Mixamo rig workflow — handoff (SUPERSEDED 2026-10-10)
+
+> Superseded by `docs/tpose-rig-workflow.md`: Mixamo bound the hanging hands
+> to the leg bones ("hands stitched to legs"). The datasets are now built
+> from `tools/rigs/*.json` (in-house T-pose + Blender bone-heat rig). Kept
+> for the FBX/JSON format notes and the gotchas below.
 
 Status date: 2026-08-26. Read this first, then `docs/handoff.md` + AGENTS.md.
 This supersedes the topology-segmentation plan (`docs/plans/topology-rig.md`)

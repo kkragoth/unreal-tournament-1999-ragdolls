@@ -32,6 +32,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import build_rig as br
 
+DEFAULT_PKG = r"C:\Users\kkragoth\dev\Unreal Tournament\Unreal Tournament\System\BotPack.u"
+
 # Mixamo bone name -> (ragdoll bone index). Finger/toe bones collapse into
 # their parent limb; feet exist only so verts bind to the shin (ragdoll skips
 # foot bodies, feet ride the shins).
@@ -66,8 +68,8 @@ JOINT_BONES = [
     ("mixamorig:Spine", None),      # pelvis-spine
     ("mixamorig:Neck", None),       # spine-neck
     ("mixamorig:Head", None),       # neck-head
-    ("mixamorig:LeftShoulder", "L"),  # spine-upperarm L
-    ("mixamorig:RightShoulder", "R"),  # spine-upperarm R
+    ("mixamorig:LeftArm", "L"),     # spine-upperarm L (shoulder joint proper)
+    ("mixamorig:RightArm", "R"),    # spine-upperarm R
     ("mixamorig:LeftForeArm", "L"),  # elbow L
     ("mixamorig:RightForeArm", "R"),  # elbow R
     ("mixamorig:LeftUpLeg", "L"),   # pelvis-thigh L
@@ -281,6 +283,7 @@ def build_rig_mixamo(data, live_name="Commando", sel_name="SelectionMale1"):
     # supports 1:1; the renderer uses Wedges(iWedge).iVertex).
     wedges = []
     faces_out = []
+    src_mats = data.get("materials")
     for fi, f in enumerate(faces):
         ws = f["verts"]
         uvs = f.get("uvs") or [(0.0, 0.0)] * 3
@@ -289,8 +292,15 @@ def build_rig_mixamo(data, live_name="Commando", sel_name="SelectionMale1"):
             u = uvs[k][0] * 255.0 if uvs else 0.0
             v = uvs[k][1] * 255.0 if uvs else 0.0
             wedges.append((ws[k], max(0, min(255, round(u))), max(0, min(255, round(v)))))
-        faces_out.append((base, base + 1, base + 2, 0))
-    materials = [(0x00000100, 0)]  # PF_TwoSided, texture slot 0 (body skin)
+        mi = f.get("mat", 0) if src_mats else 0
+        faces_out.append((base, base + 1, base + 2, mi))
+    if src_mats:
+        # tools/tpose_rig.py rigs carry the source mesh materials: keep the
+        # authored texture slots (MultiSkins 0..3 resolve per material in the
+        # renderer) and force PF_TwoSided so twisted limbs show no holes.
+        materials = [(int(fl) | 0x00000100, int(ti)) for fl, ti in src_mats]
+    else:
+        materials = [(0x00000100, 0)]  # PF_TwoSided, texture slot 0 (body skin)
 
     per_bone = n_bone_verts
     print("  per-bone verts:", per_bone)
@@ -357,7 +367,11 @@ def main(argv):
     ap.add_argument("--obj-dir", default="tools/rig_verify")
     ap.add_argument("--live", default="Commando")
     ap.add_argument("--sel", default="SelectionMale1")
-    ap.add_argument("--mixamo-dir", default="tools/mixamo_rigs")
+    ap.add_argument("--mixamo-dir", default="tools/rigs",
+                    help="dir of <Sel>.json rigs: tools/tpose_rig.py output "
+                         "(default) or fbx_to_json.py dumps (tools/mixamo_rigs)")
+    ap.add_argument("--pkg", default=DEFAULT_PKG,
+                    help="Botpack.u, only needed for un-rigged models (legacy fallback)")
     args = ap.parse_args(argv)
 
     with open(args.fbx_json) as f:
@@ -380,7 +394,7 @@ def main(argv):
         # other model that has a <Sel>.json in --mixamo-dir gets its own Mixamo
         # dataset, and only models without a Mixamo rig fall back to the legacy
         # pipeline (topo fails on some models — don't use it here).
-        pkg = br.UTPackage(r"C:\Users\kkragoth\Downloads\Unreal Tournament\Unreal Tournament\System\Botpack.u")
+        pkg = None
         done = {args.sel}
         built = [d]
         for live, sel in br.MODEL_MAP:
@@ -397,6 +411,8 @@ def main(argv):
             if sel in done:
                 continue
             print(f"\n=== {sel} (live: {live}) legacy fallback ===")
+            if pkg is None:
+                pkg = br.UTPackage(args.pkg)
             b = br.build_rig(pkg, sel, live, bind_mode="legacy")
             built.append(b)
         br.emit_header(built, args.header)
