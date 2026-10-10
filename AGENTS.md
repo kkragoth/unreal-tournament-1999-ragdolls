@@ -46,8 +46,16 @@ tuned in the console and apply to the next corpse:
 `set RagdollPkg.RagdollCarcass JointFrictionScale 0.5` (joint friction,
 1 = defaults of 0.15-0.8 Nm), `JointLimitScale` (cone/hinge ranges),
 `AngularDamping` (per-body, default 0.15), `DeathSpin` (random rad/s per
-body at death, default 3.0). Persisted under `[RagdollPkg.RagdollCarcass]`
-in UnrealTournament.ini. The 2026-10-10 defaults replaced joint brakes of
+body at death, default 2.0), `PoseVariation` (spread of the random spawn
+pose built by `ApplyDeathPose`; 0 = every corpse gets the fixed weapon-aim
+pose, 1 = default, up to 2). Persisted under `[RagdollPkg.RagdollCarcass]`
+in UnrealTournament.ini. The spawn pose is forward kinematics down the bone
+chain with a random local rotation per joint (arms forward/out + elbow flex,
+hips spread + knee flex, spine/head tilt), so it always satisfies the joint
+limits. Walk-over pushes (`execWalkOverPush`) act per body on the closest
+point of the body box to the pawn cylinder, as an off-centre impulse plus a
+radial shove, so trodden limbs rotate and splay instead of the corpse
+sliding as one block. The 2026-10-10 defaults replaced joint brakes of
 1.5-2.4 Nm (15-50% of the limbs' gravity torque, which froze limbs 20-35 deg
 from vertical) and ~doubled every joint range. Dataset body boxes are capped
 in height and checked for non-adjacent overlap in `build_rig_mixamo.py`

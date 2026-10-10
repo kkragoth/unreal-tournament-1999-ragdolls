@@ -30,10 +30,13 @@ var() globalconfig bool bBoxMannequins;
 //   JointLimitScale     multiplies every joint's cone/hinge range (1 = defaults)
 //   AngularDamping      per-body angular damping (1/s); lower = floppier
 //   DeathSpin           random angular velocity (rad/s) given to each body at death
+//   PoseVariation       spread of the random spawn pose (0 = fixed weapon-aim
+//                       pose for every corpse, 1 = default, up to 2)
 var() globalconfig float JointFrictionScale;
 var() globalconfig float JointLimitScale;
 var() globalconfig float AngularDamping;
 var() globalconfig float DeathSpin;
+var() globalconfig float PoseVariation;
 
 native function BuildRagdoll();
 native function StepRagdoll(float DeltaSeconds);
@@ -143,6 +146,7 @@ defaultproperties
 	JointLimitScale=1.0
 	AngularDamping=0.15
 	DeathSpin=2.0
+	PoseVariation=1.0
 	bAlwaysTick=true
 	RemoteRole=ROLE_SimulatedProxy
 	DrawType=DT_Mesh

@@ -169,11 +169,46 @@ static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FRagdollBone
 // Pose the freshly-created ragdoll so the corpse resembles the dead pawn
 // instead of a frozen arms-down bind statue:
 //  - yaw: rotate the whole bind skeleton (bind front = +Y) to the pawn's facing;
-//  - aim: raise the arms toward a weapon-aim (upper arm swung forward, forearm
-//    flexed ~20 deg more, head nodded slightly down-range).
-// The pose is a valid joint configuration (shoulder/elbow frames still coincide
-// at their anchors), so the joints hold it and the corpse flops naturally from
-// there. Runs before spawn clearance so embedded-body checks see the posed pose.
+//  - pose: every joint gets a per-corpse random local rotation (arms swung
+//    forward/out and flexed, legs spread/bent, spine and head tilted), scaled
+//    by the PoseVariation config knob. With PoseVariation=0 every corpse gets
+//    the old fixed weapon-aim pose (arms ~70 deg forward, elbows flexed, head
+//    nodded); at 1 the right arm keeps the aim pose on ~45% of corpses and
+//    everything else is randomized so no two corpses spawn alike.
+// Transforms are built by forward kinematics down the bone chain, so each body
+// is placed by its parent's posed anchor: the joint frames still coincide at
+// their anchors, hinge bodies rotate only about their parent's local hinge
+// axis, and the ranges stay inside the cone/hinge limits. The joints therefore
+// hold the pose and the corpse flops naturally from there. Runs before spawn
+// clearance so embedded-body checks see the posed pose.
+struct FPoseLink { INT Parent; INT Anchor; };
+static const FPoseLink GPoseChain[RAGDOLL_BONE_COUNT] =
+{
+	{ -1,             -1 },  // Pelvis (root)
+	{ BONE_Pelvis,     0 },  // Spine
+	{ BONE_Spine,      1 },  // Neck
+	{ BONE_Neck,       2 },  // Head
+	{ BONE_Spine,      3 },  // UpperArmL
+	{ BONE_Spine,      4 },  // UpperArmR
+	{ BONE_UpperArmL,  5 },  // ForearmL
+	{ BONE_UpperArmR,  6 },  // ForearmR
+	{ BONE_Pelvis,     7 },  // ThighL
+	{ BONE_Pelvis,     8 },  // ThighR
+	{ BONE_ThighL,     9 },  // ShinL
+	{ BONE_ThighR,    10 },  // ShinR
+	{ BONE_ShinL,     11 },  // FootL (box skeleton only)
+	{ BONE_ShinR,     12 },  // FootR
+};
+
+static FLOAT RandRange( FLOAT A, FLOAT B )
+{
+	return A + ( B - A ) * appFrand();
+}
+static FLOAT ClampF( FLOAT V, FLOAT Lo, FLOAT Hi )
+{
+	return V < Lo ? Lo : ( V > Hi ? Hi : V );
+}
+
 static void ApplyDeathPose( FRagdollState& S, ARagdollCarcass* C, const FVector* Anch )
 {
 	if( !S.bHasDeathPose )
@@ -187,70 +222,114 @@ static void ApplyDeathPose( FRagdollState& S, ARagdollCarcass* C, const FVector*
 	// onto that direction is a rotation about Z of (Yaw - 90 deg).
 	const FLOAT YawRad = ( S.SpawnYaw & 65535 ) * ( 2.0f * PI / 65536.0f );
 	const FLOAT Theta  = YawRad - PI / 2.0f;
-	const FLOAT Cy = appCos( Theta ), Sy = appSin( Theta );
 	b3Quat QYaw = b3MakeQuatFromAxisAngle( { 0.0f, 0.0f, 1.0f }, Theta );
 
 	// Aim: base arm raise ~70 deg from vertical; Unreal pitch (positive = up)
 	// adds a little more so high shots pose the arms higher.
 	const FLOAT PitchRad = ( S.SpawnPitch & 65535 ) * ( 2.0f * PI / 65536.0f );
-	FLOAT AimTilt = 1.22f + PitchRad * 0.25f;
-	if( AimTilt > 1.45f ) AimTilt = 1.45f;
-	if( AimTilt < 0.8f )  AimTilt = 0.8f;
-	const FLOAT ElbowFlex = AimTilt + 0.35f;
+	FLOAT AimTilt = ClampF( 1.22f + PitchRad * 0.25f, 0.8f, 1.45f );
 
-	// Rotate P about Center around world +X: swings a hanging limb forward (+Y).
-	auto ArmRot = []( const FVector& P, const FVector& Center, FLOAT a ) -> FVector
-	{
-		const FLOAT ca = appCos( a ), sa = appSin( a );
-		const FLOAT dx = P.X - Center.X, dy = P.Y - Center.Y, dz = P.Z - Center.Z;
-		return FVector( Center.X + dx,
-		                Center.Y + dy*ca - dz*sa,
-		                Center.Z + dy*sa + dz*ca );
-	};
-	auto ArmQuat = []( FLOAT a ) -> b3Quat
-	{
-		return b3MakeQuatFromAxisAngle( { 1.0f, 0.0f, 0.0f }, a );
-	};
+	// Variation amount (0 = fixed aim pose, 1 = default spread, up to 2).
+	const FLOAT Var = ClampF( RagdollFloatProp( C, TEXT("PoseVariation"), 1.0f ), 0.0f, 2.0f );
 
+	// Local joint rotations in the bind frame: X = sagittal swing (positive
+	// swings a hanging limb forward, +Y), Y = lateral swing (positive moves a
+	// hanging limb toward -X, i.e. outward for the LEFT limb), Z = twist. The
+	// cone limits measure the combined X/Y swing, so keep tilt+abduct well
+	// inside each joint's cone (shoulder 2.4, hip 1.2, spine 0.6, head 0.7).
+	auto RotX = []( FLOAT a ) -> b3Quat { return b3MakeQuatFromAxisAngle( { 1.0f, 0.0f, 0.0f }, a ); };
+	auto RotY = []( FLOAT a ) -> b3Quat { return b3MakeQuatFromAxisAngle( { 0.0f, 1.0f, 0.0f }, a ); };
+	auto Swing = [&]( FLOAT Tilt, FLOAT Abduct ) -> b3Quat { return b3MulQuat( RotY( Abduct ), RotX( Tilt ) ); };
+
+	b3Quat Local[RAGDOLL_BONE_COUNT];
+	for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+		Local[i] = b3Quat_identity;
+
+	// Trunk: slight random bend/lean; neck and head nod down-range.
+	Local[BONE_Spine] = Swing( Var * RandRange( -0.20f, 0.30f ), Var * RandRange( -0.20f, 0.20f ) );
+	Local[BONE_Neck]  = Swing( Var * RandRange( -0.10f, 0.20f ), Var * RandRange( -0.10f, 0.10f ) );
+	Local[BONE_Head]  = Swing( ClampF( 0.35f + Var * RandRange( -0.40f, 0.20f ), -0.10f, 0.55f ),
+	                           Var * RandRange( -0.20f, 0.20f ) );
+
+	// Arms. Outward abduction is +Y rotation for the left arm, -Y for the right.
+	FLOAT ArmTilt[2], ArmAbd[2], ArmFlex[2];
+	for( INT s=0; s<2; s++ )
+	{
+		const UBOOL bAimArm = ( s == 1 ) && ( appFrand() < 0.45f );   // right = weapon arm
+		if( bAimArm )
+		{
+			ArmTilt[s] = ClampF( AimTilt + Var * RandRange( -0.15f, 0.15f ), -0.4f, 1.45f );
+			ArmAbd[s]  = Var * RandRange( 0.0f, 0.20f );
+			ArmFlex[s] = 0.35f + Var * RandRange( 0.0f, 0.30f );
+		}
+		else
+		{
+			ArmTilt[s] = ClampF( AimTilt + Var * RandRange( -1.50f, 0.30f ), -0.4f, 1.45f );
+			ArmAbd[s]  = Var * RandRange( 0.0f, 0.90f );
+			ArmFlex[s] = ClampF( 0.35f + Var * RandRange( -0.25f, 1.20f ), 0.05f, 1.80f );
+		}
+	}
+	Local[BONE_UpperArmL] = Swing( ArmTilt[0],  ArmAbd[0] );
+	Local[BONE_UpperArmR] = Swing( ArmTilt[1], -ArmAbd[1] );
+	Local[BONE_ForearmL]  = RotX( ArmFlex[0] );   // elbow hinge: flex is +X
+	Local[BONE_ForearmR]  = RotX( ArmFlex[1] );
+
+	// Legs: hips swing/spread a little, knees flex (hinge range is -2.0..0.05,
+	// so flexion is a NEGATIVE X rotation: the shin folds backward).
+	FLOAT LegTilt[2], LegAbd[2], KneeFlex[2];
+	for( INT s=0; s<2; s++ )
+	{
+		LegTilt[s]  = Var * RandRange( -0.35f, 0.70f );
+		LegAbd[s]   = Var * RandRange(  0.00f, 0.40f );
+		KneeFlex[s] = -Var * RandRange( 0.00f, 1.10f );
+	}
+	Local[BONE_ThighL] = Swing( LegTilt[0],  LegAbd[0] );
+	Local[BONE_ThighR] = Swing( LegTilt[1], -LegAbd[1] );
+	Local[BONE_ShinL]  = RotX( KneeFlex[0] );
+	Local[BONE_ShinR]  = RotX( KneeFlex[1] );
+
+	static INT GPoseDbg = 0;
+	if( GPoseDbg < 8 )
+	{
+		GPoseDbg++;
+		debugf( TEXT("RagdollPkg: pose %s var=%.2f armL=(%.2f,%.2f,%.2f) armR=(%.2f,%.2f,%.2f) legL=(%.2f,%.2f,%.2f) legR=(%.2f,%.2f,%.2f)"),
+			C->GetName(), Var,
+			ArmTilt[0], ArmAbd[0], ArmFlex[0], ArmTilt[1], ArmAbd[1], ArmFlex[1],
+			LegTilt[0], LegAbd[0], KneeFlex[0], LegTilt[1], LegAbd[1], KneeFlex[1] );
+	}
+
+	// Forward kinematics over the chain (parents always precede children in
+	// the bone enum). Positions are bind-space offsets from the corpse origin
+	// in UU; WorldQ is the accumulated rotation.
+	b3Vec3 WP[RAGDOLL_BONE_COUNT];
+	b3Quat WQ[RAGDOLL_BONE_COUNT];
 	for( INT i=0; i<S.NumBodies; i++ )
 	{
 		const FRagdollBoneDef& D = Defs[i];
-		FVector P = Origin + DrawScale * FVector( D.CX, D.CY, D.CZ );
-		b3Quat Q = b3Quat_identity;
-
-		if( i == BONE_UpperArmL || i == BONE_UpperArmR )
+		const b3Vec3 Ci = { DrawScale * D.CX, DrawScale * D.CY, DrawScale * D.CZ };
+		const FPoseLink& L = GPoseChain[i];
+		if( L.Parent < 0 )
 		{
-			const INT SIdx = ( i == BONE_UpperArmL ) ? 3 : 4;    // shoulder anchor
-			const FVector Ash = Origin + DrawScale * Anch[SIdx];
-			P = ArmRot( P, Ash, AimTilt );
-			Q = ArmQuat( AimTilt );
+			WP[i] = Ci;
+			WQ[i] = b3Quat_identity;
 		}
-		else if( i == BONE_ForearmL || i == BONE_ForearmR )
+		else
 		{
-			const INT SIdx = ( i == BONE_ForearmL ) ? 3 : 4;
-			const INT EIdx = ( i == BONE_ForearmL ) ? 5 : 6;     // elbow anchor
-			const FVector Ash = Origin + DrawScale * Anch[SIdx];
-			const FVector Ael = Origin + DrawScale * Anch[EIdx];
-			const FVector Enew = ArmRot( Ael, Ash, AimTilt );    // posed elbow
-			FVector Pf = ArmRot( P, Ash, AimTilt );              // follow shoulder
-			P = ArmRot( Pf, Enew, ElbowFlex );                   // then flex elbow
-			Q = ArmQuat( AimTilt + ElbowFlex );                  // combined rotation
-		}
-		else if( i == BONE_Head )
-		{
-			const FVector AnchN = Origin + DrawScale * Anch[2];  // neck anchor
-			P = ArmRot( P, AnchN, 0.35f );
-			Q = ArmQuat( 0.35f );
+			const FRagdollBoneDef& DP = Defs[L.Parent];
+			const b3Vec3 Cp = { DrawScale * DP.CX, DrawScale * DP.CY, DrawScale * DP.CZ };
+			const b3Vec3 A  = { DrawScale * Anch[L.Anchor].X, DrawScale * Anch[L.Anchor].Y, DrawScale * Anch[L.Anchor].Z };
+			WQ[i] = b3MulQuat( WQ[L.Parent], Local[i] );
+			// posed anchor = parent center + parent rotation * (anchor - parent center)
+			const b3Vec3 PA = b3Add( WP[L.Parent], b3RotateVector( WQ[L.Parent], b3Sub( A, Cp ) ) );
+			// body center hangs off the posed anchor by its own rotation
+			WP[i] = b3Add( PA, b3RotateVector( WQ[i], b3Sub( Ci, A ) ) );
 		}
 
-		// Yaw the posed position about the corpse origin; arm pose composes
-		// under the yaw (apply arm first, then yaw).
-		const FVector Dv = P - Origin;
-		P = Origin + FVector( Dv.X*Cy - Dv.Y*Sy, Dv.X*Sy + Dv.Y*Cy, Dv.Z );
-		Q = b3MulQuat( QYaw, Q );
-
+		// Yaw the posed skeleton about the corpse origin (pose first, then yaw).
+		const b3Vec3 Py = b3RotateVector( QYaw, WP[i] );
+		const b3Quat Q  = b3MulQuat( QYaw, WQ[i] );
 		b3Body_SetTransform( S.Bodies[i],
-			{ P.X*RAGDOLL_U2M, P.Y*RAGDOLL_U2M, P.Z*RAGDOLL_U2M }, Q );
+			{ ( Origin.X + Py.x ) * RAGDOLL_U2M, ( Origin.Y + Py.y ) * RAGDOLL_U2M, ( Origin.Z + Py.z ) * RAGDOLL_U2M }, Q );
 	}
 }
 
@@ -725,11 +804,16 @@ void ARagdollCarcass::execApplyDamageImpulse( FFrame& Stack, RESULT_DECL )
 	unguard;
 }
 
-// Walk-over push: a living pawn moving over the corpse drags the bodies under
-// its feet along with it. Uses velocity matching (eased toward the pawn's
-// horizontal motion, capped) instead of impulses, so the corpse slides aside
-// at the pawn's pace and stops when the pawn stops. Impulses here would stack
-// up over the 50 Hz ticks and launch the ragdoll.
+// Walk-over push: a living pawn moving over the corpse shoves the body parts
+// its collision cylinder actually touches. Per body, the closest point of the
+// body's box to the pawn's cylinder axis is found; only bodies whose box comes
+// within the pawn radius (plus a short soft band) react, so stepping on a hand
+// moves the hand and forearm, not the whole corpse. The reaction is a velocity
+// match at the CONTACT POINT (eased toward the pawn's horizontal motion plus
+// a radial shove away from the pawn axis, applied as an off-centre impulse),
+// so a trodden limb rotates and splays out of the way instead of the corpse
+// translating as one block. Deficit-based easing can't stack over the 50 Hz
+// ticks: once the limb moves with the pawn the correction goes to zero.
 void ARagdollCarcass::execWalkOverPush( FFrame& Stack, RESULT_DECL )
 {
 	guard(ARagdollCarcass::execWalkOverPush);
@@ -759,23 +843,70 @@ void ARagdollCarcass::execWalkOverPush( FFrame& Stack, RESULT_DECL )
 		Push.y *= Scl;
 	}
 
-	// Pawn feet position in meters; only bodies roughly under the feet react.
-	FLOAT Px = P->Location.X * RAGDOLL_U2M;
-	FLOAT Py = P->Location.Y * RAGDOLL_U2M;
-	FLOAT FootZ = ( P->Location.Z - P->CollisionHeight ) * RAGDOLL_U2M;
+	// Pawn collision cylinder in meters.
+	const FLOAT Px    = P->Location.X * RAGDOLL_U2M;
+	const FLOAT Py    = P->Location.Y * RAGDOLL_U2M;
+	const FLOAT FootZ = ( P->Location.Z - P->CollisionHeight ) * RAGDOLL_U2M;
+	const FLOAT TopZ  = ( P->Location.Z + P->CollisionHeight ) * RAGDOLL_U2M;
+	const FLOAT PawnR = Max( P->CollisionRadius, 10.0f ) * RAGDOLL_U2M;
+	const FLOAT Band  = 0.18f;   // soft contact band outside the cylinder (m)
+	const FLOAT Gain  = 0.35f;   // per-tick easing toward the target velocity
+	const FLOAT Radial = 1.2f;   // m/s shove away from the pawn axis
+	const FLOAT LiftV  = 0.6f;   // m/s: trodden parts hop slightly so they roll
+
+	const FLOAT Scale = ( this->DrawScale > 0.0f ) ? this->DrawScale : 1.0f;
+	const FRagdollBoneDef* Defs = S->BoneDefs ? S->BoneDefs : GRagdollBoneDefs;
 
 	for( INT i=0; i<S->NumBodies; i++ )
 	{
+		const FRagdollBoneDef& D = Defs[i];
+		const FLOAT HX = D.HX * Scale * RAGDOLL_U2M;
+		const FLOAT HY = D.HY * Scale * RAGDOLL_U2M;
+		const FLOAT HZ = D.HZ * Scale * RAGDOLL_U2M;
 		b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
-		FLOAT dx = T.p.x - Px, dy = T.p.y - Py, dz = T.p.z - FootZ;
-		if( dx*dx + dy*dy > 0.85f*0.85f )
+
+		// Cheap reject on the body's bounding sphere.
+		const FLOAT Reach = sqrt( HX*HX + HY*HY + HZ*HZ ) + PawnR + Band;
+		FLOAT dx = T.p.x - Px, dy = T.p.y - Py;
+		if( dx*dx + dy*dy > Reach*Reach )
 			continue;
-		if( dz > 0.7f || dz < -1.3f )
+		if( T.p.z - HZ - HX > TopZ || T.p.z + HZ + HX < FootZ - 0.45f )
 			continue;
-		b3Vec3 V = b3Body_GetLinearVelocity( S->Bodies[i] );
-		V.x += ( Push.x - V.x ) * 0.35f;   // ease toward the pawn's motion
-		V.y += ( Push.y - V.y ) * 0.35f;
-		b3Body_SetLinearVelocity( S->Bodies[i], V );
+
+		// Closest point of the box to the pawn axis, sampled at the body's own
+		// height clamped into the cylinder (a limb lying under the feet probes
+		// at foot level, a part beside the shins at its own level).
+		const FLOAT Sz = ClampF( T.p.z, FootZ - 0.3f, TopZ );
+		const b3Vec3 Sample = { Px, Py, Sz };
+		b3Vec3 Lp = b3InvRotateVector( T.q, b3Sub( Sample, T.p ) );
+		Lp.x = ClampF( Lp.x, -HX, HX );
+		Lp.y = ClampF( Lp.y, -HY, HY );
+		Lp.z = ClampF( Lp.z, -HZ, HZ );
+		const b3Vec3 Cw = b3Add( b3RotateVector( T.q, Lp ), T.p );
+		const FLOAT cdx = Cw.x - Px, cdy = Cw.y - Py;
+		const FLOAT d = sqrt( cdx*cdx + cdy*cdy );
+		if( Cw.z > TopZ || Cw.z < FootZ - 0.45f )
+			continue;
+		const FLOAT W = ClampF( 1.0f - ( d - PawnR ) / Band, 0.0f, 1.0f );
+		if( W <= 0.0f )
+			continue;
+
+		// Target velocity at the contact point: the pawn's motion plus a shove
+		// outward from the pawn axis so limbs splay rather than march together.
+		b3Vec3 Target = Push;
+		if( d > 0.01f )
+		{
+			Target.x += cdx / d * Radial;
+			Target.y += cdy / d * Radial;
+		}
+		const b3Vec3 Vc = b3Body_GetWorldPointVelocity( S->Bodies[i], Cw );
+		b3Vec3 dV;
+		dV.x = ( Target.x - Vc.x ) * Gain * W;
+		dV.y = ( Target.y - Vc.y ) * Gain * W;
+		dV.z = ( Vc.z < LiftV ) ? ( LiftV - Vc.z ) * Gain * W * 0.5f : 0.0f;
+		const FLOAT Mass = b3Body_GetMass( S->Bodies[i] );
+		const b3Vec3 Imp = { dV.x * Mass, dV.y * Mass, dV.z * Mass };
+		b3Body_ApplyLinearImpulse( S->Bodies[i], Imp, Cw, true );   // off-centre -> limb rotates
 	}
 	unguard;
 }

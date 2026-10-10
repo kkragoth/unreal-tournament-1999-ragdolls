@@ -266,7 +266,10 @@ void ClearCorpseSpawn( FRagdollState& S, FRagdollLevelWorld& LW )
 		FLOAT NewZ = R.point.z + 0.15f;
 		if( NewZ - P.z > 0.5f )
 			NewZ = P.z + 0.5f;   // cap so limbs are not teleported away
-		b3Body_SetTransform( S.Bodies[i], { P.x, P.y, NewZ }, b3Quat_identity );
+		// Keep the death-pose rotation: resetting to identity used to snap a
+		// lifted limb back to the bind orientation while its joint partner kept
+		// the posed one, so the chain started every spawn with a limit violation.
+		b3Body_SetTransform( S.Bodies[i], { P.x, P.y, NewZ }, b3Body_GetRotation( S.Bodies[i] ) );
 		Lifted++;
 	}
 	if( Lifted )
