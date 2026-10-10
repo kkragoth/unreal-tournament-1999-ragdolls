@@ -38,6 +38,13 @@ var() globalconfig float AngularDamping;
 var() globalconfig float DeathSpin;
 var() globalconfig float PoseVariation;
 
+// Gore bookkeeping (script-only; appended after the natively mirrored vars so
+// the C++ class layout in RagdollPkgClasses.h stays valid).
+var class<Carcass> StockCarcassClass; // the pawn's CarcassType (TMale1Carcass, ...)
+var Mesh           SourceMesh;        // the pawn's LodMesh (Mesh is swapped for the ragdoll mesh)
+var name           DeathAnim;         // pawn AnimSequence at death (Dead4/Dead6 = decapitated)
+var bool           bGibbed;
+
 native function BuildRagdoll();
 native function StepRagdoll(float DeltaSeconds);
 native function SyncRagdoll();
@@ -50,12 +57,58 @@ native function SetDeathPose(int Yaw, int Pitch);
 // hit into a Box3D impulse on the bodies near the impact point. The base
 // Carcass/Pawn damage handling is deliberately skipped: our actor has no
 // movement physics of its own (PHYS_None), and letting the base physics code
-// run would fight the Box3D sync. Gibbing can be layered on later.
+// run would fight the Box3D sync. The stock Carcass gib thresholds are kept
+// so a corpse under sustained fire still gibs: a single hit above 40% of
+// Mass, or accumulated damage above 80% of Mass ('shot' damage counts 40%).
 function TakeDamage(int Damage, Pawn instigatedBy, Vector hitlocation, Vector momentum, name damageType)
 {
-	if ( bDecorative )
+	if ( bDecorative || bGibbed )
 		return;
 	ApplyDamageImpulse(hitlocation, momentum, Damage);
+	if ( damageType == 'shot' )
+		Damage *= 0.4;
+	CumulativeDamage += Damage;
+	if ( (Damage > 0.4 * Mass) || (CumulativeDamage > 0.8 * Mass) )
+		ChunkUp(Damage);
+}
+
+// Gib the corpse. Carcass.ChunkUp is Destroy(), which is why a gibbing kill
+// (Pawn.SpawnGibbedCarcass: Initfor + ChunkUp(-Health)) used to make the
+// fresh ragdoll vanish. Interim implementation: spawn the pawn's stock carcass
+// class (owned by us, so the spawn notify lets it through), hand it our
+// appearance and let ITS ChunkUp spawn the stock UT_BigBloodHit + the
+// MasterReplacement chunk (torso, arm, thighs, feet, organ, head unless the
+// death anim is a decapitation), then remove the ragdoll.
+function ChunkUp(int Damage)
+{
+	local Carcass Stock;
+	local int i;
+
+	if ( bGibbed )
+		return;
+	bGibbed = true;
+	if ( StockCarcassClass != None )
+	{
+		Stock = Spawn(StockCarcassClass, self,, Location, Rotation);
+		if ( Stock != None )
+		{
+			Stock.PlayerOwner = PlayerOwner;
+			Stock.bDecorative = false;
+			Stock.Mesh = SourceMesh;
+			Stock.Skin = Skin;
+			for ( i=0; i<4; i++ )
+				Stock.MultiSkins[i] = MultiSkins[i];
+			Stock.DrawScale = DrawScale;
+			Stock.Fatness = Fatness;
+			Stock.AnimSequence = DeathAnim;
+			Stock.Velocity = Velocity;
+			Stock.Mass = Mass;
+			Stock.ChunkUp(Damage);
+		}
+		else
+			Log("RagdollCarcass: ChunkUp could not spawn " $ StockCarcassClass, 'RagdollTest');
+	}
+	Destroy();
 }
 
 function PostBeginPlay()
@@ -75,6 +128,9 @@ function Initfor(actor Other)
 
 	Super.Initfor(Other);
 	PlayerOwner = Pawn(Other).PlayerReplicationInfo;
+	StockCarcassClass = FindCarcassClass(Other);
+	SourceMesh = Other.Mesh;
+	DeathAnim = Other.AnimSequence;
 	PrePivot = vect(0,0,0);
 	for ( i=0; i<4; i++ )
 		Multiskins[i] = Pawn(Other).MultiSkins[i];
@@ -91,6 +147,27 @@ function Initfor(actor Other)
 	Mass = Other.Mass;
 	SetDeathPose(Pawn(Other).Rotation.Yaw, Pawn(Other).Rotation.Pitch);
 	BuildRagdoll();
+}
+
+// CarcassType is declared on PlayerPawn and Bot (not Pawn), so read it by
+// name; the text form is Class'Botpack.TMale1Carcass'.
+function class<Carcass> FindCarcassClass(Actor Other)
+{
+	local string S;
+	local int i;
+
+	S = Other.GetPropertyText("CarcassType");
+	i = InStr(S, "'");
+	if ( i >= 0 )
+	{
+		S = Mid(S, i + 1);
+		i = InStr(S, "'");
+		if ( i >= 0 )
+			S = Left(S, i);
+	}
+	if ( S == "" || S ~= "None" )
+		return None;
+	return class<Carcass>(DynamicLoadObject(S, class'Class'));
 }
 
 function Timer()
