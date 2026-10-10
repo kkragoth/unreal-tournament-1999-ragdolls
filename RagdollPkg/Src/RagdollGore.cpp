@@ -498,8 +498,12 @@ void RagdollSplitIslands( FRagdollState& S )
 	const INT NumF0 = Mesh->Faces.Num();
 	const INT NumW0 = Mesh->Wedges.Num();
 
+	// bPlanarCuts off (default): no planes at all - dominant-bone islands,
+	// every seam face takes the duplicated-skirt path, full centroid fans.
+	const UBOOL bPlanar = S.bPlanarCuts;
+
 	// Joint planes of the cut joints, fitted once when the cut first appears.
-	for( INT c=1; c<S.NumBodies && c<RAGDOLL_BONE_COUNT; c++ )
+	for( INT c=1; bPlanar && c<S.NumBodies && c<RAGDOLL_BONE_COUNT; c++ )
 		if( S.Alive[c] && S.Cut[c] && !S.JointPlanes[c].bValid )
 			S.JointPlanes[c] = FitJointPlane( S, c, Island );
 
@@ -518,7 +522,7 @@ void RagdollSplitIslands( FRagdollState& S )
 		INT I = ( b >= 0 && b < RAGDOLL_MAX_BONES ) ? Island[b] : -1;
 		INT Pf = -1;
 		const FVector& P = S.BindPos( v );
-		for( INT c=1; c<S.NumBodies && c<RAGDOLL_BONE_COUNT; c++ )
+		for( INT c=1; bPlanar && c<S.NumBodies && c<RAGDOLL_BONE_COUNT; c++ )
 		{
 			if( !S.Alive[c] || !S.Cut[c] || !S.JointPlanes[c].bValid )
 				continue;
@@ -705,7 +709,7 @@ void RagdollSplitIslands( FRagdollState& S )
 		const FRagdollCutPlane* Plane = NULL;
 		INT   PlaneSub = -1;     // group sub-id of the plane
 		FLOAT d[3], s = 1.0f;
-		if( NumPresent == 2 )
+		if( bPlanar && NumPresent == 2 )
 		{
 			const INT I = Present[0], J = Present[1];
 			FVector P[3];
@@ -881,8 +885,8 @@ void RagdollSplitIslands( FRagdollState& S )
 			if( !Da || !Db )
 				continue;
 			const FLOAT Lim = RAGDOLL_FALLBACK_CAP_SCALE * BoneRadius( S, I ) + RAGDOLL_FALLBACK_CAP_MARGIN;
-			if( FDistSquared( S.BindPos( *Da ), Apex ) > Lim * Lim || FDistSquared( S.BindPos( *Db ), Apex ) > Lim * Lim )
-				continue;
+			if( bPlanar && ( FDistSquared( S.BindPos( *Da ), Apex ) > Lim * Lim || FDistSquared( S.BindPos( *Db ), Apex ) > Lim * Lim ) )
+				continue;   // (full fans when planar cuts are off, as before)
 			a = *Da;
 			b = *Db;
 		}
@@ -920,8 +924,8 @@ void RagdollSplitIslands( FRagdollState& S )
 
 	RefreshMeshTables( Mesh, S.BindPos.Num() );
 	S.NumSplits++;
-	debugf( TEXT("RagdollPkg: SplitIslands #%i moved=%i seam=%i planar=%i fallback=%i caps=%i verts %i->%i faces %i->%i wedges %i->%i"),
-		S.NumSplits, NumMoved, NumSeam, NumPlanar, NumFallback, NumCaps, NumV0, Mesh->FrameVerts, NumF0, Mesh->Faces.Num(), NumW0, Mesh->Wedges.Num() );
+	debugf( TEXT("RagdollPkg: SplitIslands #%i planarcuts=%i moved=%i seam=%i planar=%i fallback=%i caps=%i verts %i->%i faces %i->%i wedges %i->%i"),
+		S.NumSplits, bPlanar, NumMoved, NumSeam, NumPlanar, NumFallback, NumCaps, NumV0, Mesh->FrameVerts, NumF0, Mesh->Faces.Num(), NumW0, Mesh->Wedges.Num() );
 	unguard;
 }
 

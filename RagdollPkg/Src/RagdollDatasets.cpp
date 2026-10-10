@@ -39,21 +39,28 @@ FLOAT RagdollFloatProp( UObject* Obj, const TCHAR* Name, FLOAT Default )
 	unguard;
 }
 
-UBOOL RagdollForceBoxes( UObject* Obj )
+UBOOL RagdollBoolProp( UObject* Obj, const TCHAR* Name, UBOOL Default )
 {
-	guard(RagdollForceBoxes);
-	// Read the live bBoxMannequins value through the script property list.
-	// The console "set" command updates the class default immediately and new
-	// carcasses inherit it at spawn, so this is always current - without
-	// depending on which ini file/path GConfig has cached.
+	guard(RagdollBoolProp);
+	// Read a live bool value through the script property list. The console
+	// "set" command updates the class default immediately and new carcasses
+	// inherit it at spawn, so this is always current - without depending on
+	// which ini file/path GConfig has cached.
 	if( !Obj )
-		return 0;
+		return Default;
 	for( TFieldIterator<UBoolProperty> It( Obj->GetClass() ); It; ++It )
 	{
 		UBoolProperty* P = *It;
-		if( appStricmp( P->GetName(), TEXT("bBoxMannequins") ) == 0 )
+		if( appStricmp( P->GetName(), Name ) == 0 )
 			return ( *(BITFIELD*)( (BYTE*)Obj + P->Offset ) & P->BitMask ) ? 1 : 0;
 	}
-	return 0;
+	return Default;
+	unguard;
+}
+
+UBOOL RagdollForceBoxes( UObject* Obj )
+{
+	guard(RagdollForceBoxes);
+	return RagdollBoolProp( Obj, TEXT("bBoxMannequins"), 0 );
 	unguard;
 }

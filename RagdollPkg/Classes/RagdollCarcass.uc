@@ -78,6 +78,11 @@ var bool           bGibbed;
 // The game's bLowGore / bVeryLowGore flags disable all of it.
 var() globalconfig int   GoreLevel;
 var() globalconfig float DismemberScale;
+//   bPlanarCuts     true = clip the skin along a fitted plane per cut (flat
+//                   stump caps); false (default) = the earlier dominant-bone
+//                   split with centroid fans. The planar version looked
+//                   broken in the 2026-10-10 playtest; off until understood.
+var() globalconfig bool  bPlanarCuts;
 
 var float  PartDamage[14];     // damage accumulated per body by hits on the corpse
 var bool   bDecapitated;
@@ -577,6 +582,7 @@ defaultproperties
 	PoseVariation=1.0
 	GoreLevel=2
 	DismemberScale=1.0
+	bPlanarCuts=false
 	bAlwaysTick=true
 	RemoteRole=ROLE_SimulatedProxy
 	DrawType=DT_Mesh

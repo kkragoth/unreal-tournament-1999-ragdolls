@@ -147,12 +147,17 @@ struct FRagdollState
 	FRagdollCutPlane JointPlanes[RAGDOLL_BONE_COUNT];
 	INT              NumFragPlanes;
 	FRagdollCutPlane FragPlanes[RAGDOLL_MAX_EXTRA];
+	// Config flag bPlanarCuts (read at build time): planar clipping ON, or the
+	// 2026-10-10 morning behaviour (dominant-bone islands, duplicated skirts,
+	// centroid fans). OFF by default: the planar version looked broken in the
+	// user's playtest (see docs/handoff-2026-10-10-gore.md).
+	UBOOL            bPlanarCuts;
 
 	FRagdollState()
 	: bBuilt( 0 ), bFrameLogged( 0 ), bFrameRangeLogged( 0 ), bOutOfWorldLogged( 0 )
 	, SyncCount( 0 ), NumBodies( 0 ), World( b3_nullWorldId ), Mesh( NULL ), BoneDefs( NULL )
 	, SpawnYaw( 0 ), SpawnPitch( 0 ), bHasDeathPose( 0 )
-	, Dataset( NULL ), CapMaterial( -1 ), NumSplits( 0 ), NumExtra( 0 ), NumFragPlanes( 0 )
+	, Dataset( NULL ), CapMaterial( -1 ), NumSplits( 0 ), NumExtra( 0 ), NumFragPlanes( 0 ), bPlanarCuts( 0 )
 	{
 		for( INT t=0; t<8; t++ )
 			WoundSkins[t] = NULL;
@@ -276,6 +281,9 @@ FLOAT RagdollFloatProp( UObject* Obj, const TCHAR* Name, FLOAT Default );
 // "set RagdollPkg.RagdollCarcass bBoxMannequins 1" or via UnrealTournament.ini
 // ([RagdollPkg.RagdollCarcass]); affects corpses spawned afterwards.
 UBOOL RagdollForceBoxes( UObject* Obj );
+
+// Read a BOOL script property by name (same mechanism); Default when missing.
+UBOOL RagdollBoolProp( UObject* Obj, const TCHAR* Name, UBOOL Default );
 
 // Rebuild the vertex->triangle adjacency (Connects/VertLinks) from the mesh's
 // Faces/Wedges. Must be re-run after any face/vertex rewrite.

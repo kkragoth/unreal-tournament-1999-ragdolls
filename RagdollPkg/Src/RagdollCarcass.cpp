@@ -482,6 +482,7 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	// Ranges sized for a corpse (shoulder ~140 deg cone, elbow/knee ~130-140 deg
 	// one-sided flexion, hip ~100 deg cone); friction in Nm, tiny versus the
 	// limbs' gravity torque (upper arm ~4 Nm, thigh ~10 Nm) so joints flop.
+	S.bPlanarCuts       = RagdollBoolProp( C, TEXT("bPlanarCuts"), 0 );
 	GJointFrictionScale = RagdollFloatProp( C, TEXT("JointFrictionScale"), 1.0f );
 	GJointLimitScale    = RagdollFloatProp( C, TEXT("JointLimitScale"), 1.0f );
 	AddJoint( S, BONE_Pelvis,    BONE_Spine,     Defs, Anch[0], DrawScale, { JK_Ball, 0.60f, -0.40f,  0.40f, 0.8f } );
