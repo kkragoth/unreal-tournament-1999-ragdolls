@@ -55,6 +55,9 @@ for n, group in enumerate(objs):
         else:
             o.data.materials.append(mat(o.name, color_for(o.name)))
 
+# Meshes that carry per-vertex colours (weight-blended OBJs) render with them.
+if any(o.type == "MESH" and len(o.data.color_attributes) for o in scene.objects):
+    bpy.context.scene.display.shading.color_type = "VERTEX"
 bpy.context.view_layer.update()
 pts = [o.matrix_world @ v.co for o in scene.objects if o.type == "MESH" for v in o.data.vertices]
 mn = Vector((min(v.x for v in pts), min(v.y for v in pts), min(v.z for v in pts)))
@@ -62,7 +65,8 @@ mx = Vector((max(v.x for v in pts), max(v.y for v in pts), max(v.z for v in pts)
 ctr = (mn + mx) / 2
 ext = mx - mn
 scene.render.engine = "BLENDER_WORKBENCH"
-scene.display.shading.color_type = "MATERIAL"
+if scene.display.shading.color_type != "VERTEX":
+    scene.display.shading.color_type = "MATERIAL"
 scene.display.shading.light = "STUDIO"
 scene.display.shading.show_backface_culling = False
 W = ext.x if view in ("front", "back") else ext.y if view == "side" else ext.length
