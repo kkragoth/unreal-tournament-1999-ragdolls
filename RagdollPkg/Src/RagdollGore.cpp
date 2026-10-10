@@ -364,8 +364,11 @@ static INT AddBoundVertex( FRagdollState& S, URagdollMesh* Mesh, const FVector& 
 
 // Append a vertex at bind position P skinned like 'Like' (same bones and
 // weights, offsets recomputed for P): linear-blend skinning of a new point.
-static INT AddBlendVertex( FRagdollState& S, URagdollMesh* Mesh, const FVector& P, const FRagdollVertexBind& Like )
+static INT AddBlendVertex( FRagdollState& S, URagdollMesh* Mesh, const FVector& P, const FRagdollVertexBind& LikeRef )
 {
+	// Copy first: LikeRef usually points INTO S.VertBinds, which Add() below
+	// may reallocate (that dangling reference crashed the game client).
+	const FRagdollVertexBind Like = LikeRef;
 	INT nv = S.BindPos.Num();
 	S.BindPos.AddItem( P );
 	INT bi = S.VertBinds.Add();
@@ -770,12 +773,16 @@ void RagdollSplitIslands( FRagdollState& S )
 				const FLOAT dk = Side * d[k], dk2 = Side * d[k2];
 				if( dk <= RAGDOLL_CUT_EPS && NumPoly < 4 )
 				{
-					const FMeshWedge& W = Mesh->Wedges( F.iWedge[k] );
+					const BYTE WU = Mesh->Wedges( F.iWedge[k] ).TexUV.U;   // copies: AddWedge grows Wedges
+					const BYTE WV = Mesh->Wedges( F.iWedge[k] ).TexUV.V;
 					INT wk;
 					if( isl[k] == I )
 						wk = F.iWedge[k];
 					else
-						wk = AddWedge( Mesh, FHelp::Dup( S, Mesh, Island, Orig, DupMap, ApexSum, ApexN, v[k], isl[k], I ), W.TexUV.U, W.TexUV.V );
+					{
+						const INT dv = FHelp::Dup( S, Mesh, Island, Orig, DupMap, ApexSum, ApexN, v[k], isl[k], I );
+						wk = AddWedge( Mesh, dv, WU, WV );
+					}
 					PolyW[NumPoly]  = wk;
 					PolyOn[NumPoly] = ( Abs( d[k] ) <= RAGDOLL_CUT_EPS );
 					NumPoly++;
@@ -796,8 +803,8 @@ void RagdollSplitIslands( FRagdollState& S )
 						xv = AddBlendVertex( S, Mesh, X, S.VertBinds( v[Inside] ) );
 						Isect.Set( Key, xv );
 					}
-					const FMeshWedge& W1 = Mesh->Wedges( F.iWedge[k] );
-					const FMeshWedge& W2 = Mesh->Wedges( F.iWedge[k2] );
+					const FMeshWedge W1 = Mesh->Wedges( F.iWedge[k] );    // copies, see above
+					const FMeshWedge W2 = Mesh->Wedges( F.iWedge[k2] );
 					const BYTE U = (BYTE)Clamp( appRound( W1.TexUV.U + ( (FLOAT)W2.TexUV.U - W1.TexUV.U ) * t ), 0, 255 );
 					const BYTE V = (BYTE)Clamp( appRound( W1.TexUV.V + ( (FLOAT)W2.TexUV.V - W1.TexUV.V ) * t ), 0, 255 );
 					PolyW[NumPoly]  = AddWedge( Mesh, xv, U, V );
