@@ -71,6 +71,21 @@ struct FRagdollVertexBind
 	FLOAT  Weight[3];
 };
 
+// A planar cut through the skin (bind space, UU, DrawScale=1): point A,
+// unit normal N (toward the child / the fragment's positive side). W is how
+// far the original heat-weight seam ring wandered off the plane, R the ring's
+// radius about the axis; both bound which parent-side vertices get moved onto
+// the child side so a limb plane never claims skin on the far side of the body.
+struct FRagdollCutPlane
+{
+	FVector A;
+	FVector N;
+	FLOAT   W;
+	FLOAT   R;
+	UBOOL   bValid;
+	FRagdollCutPlane() : A( 0, 0, 0 ), N( 0, 0, 1 ), W( 0 ), R( 0 ), bValid( 0 ) {}
+};
+
 // Runtime state for one ragdolling carcass. Stored in a process-global map
 // keyed by the owning actor so URagdollMesh::GetFrame can reach it.
 struct FRagdollState
@@ -124,11 +139,20 @@ struct FRagdollState
 	FVector   ExtraCenter[RAGDOLL_MAX_EXTRA];
 	FLOAT     ExtraRadius[RAGDOLL_MAX_EXTRA];
 
+	// Cut planes (RagdollGore.cpp). JointPlanes[child] is fitted once, when
+	// that joint is first seen cut, from the heat-weight seam ring; FragPlanes
+	// are the random planes RagdollFragmentBody split bodies with, in
+	// creation order. Seam faces are clipped against whichever plane separates
+	// their two islands, so the stump rims are exact planar polygons.
+	FRagdollCutPlane JointPlanes[RAGDOLL_BONE_COUNT];
+	INT              NumFragPlanes;
+	FRagdollCutPlane FragPlanes[RAGDOLL_MAX_EXTRA];
+
 	FRagdollState()
 	: bBuilt( 0 ), bFrameLogged( 0 ), bFrameRangeLogged( 0 ), bOutOfWorldLogged( 0 )
 	, SyncCount( 0 ), NumBodies( 0 ), World( b3_nullWorldId ), Mesh( NULL ), BoneDefs( NULL )
 	, SpawnYaw( 0 ), SpawnPitch( 0 ), bHasDeathPose( 0 )
-	, Dataset( NULL ), CapMaterial( -1 ), NumSplits( 0 ), NumExtra( 0 )
+	, Dataset( NULL ), CapMaterial( -1 ), NumSplits( 0 ), NumExtra( 0 ), NumFragPlanes( 0 )
 	{
 		for( INT t=0; t<8; t++ )
 			WoundSkins[t] = NULL;
@@ -168,9 +192,10 @@ b3BodyId RagdollBody( const FRagdollState& S, INT Bone );
 UBOOL    RagdollBoneAlive( const FRagdollState& S, INT Bone );
 FVector  RagdollBoneCenter( const FRagdollState& S, INT Bone );
 
-// Split the skin bound to 'Body' into K chunks (k-means on bind positions):
-// chunk 0 keeps the existing body, every other chunk gets a new box body at
-// its place in the world with the parent's velocity. Call after
+// Split the skin bound to 'Body' into K chunks with K-1 random planes (each
+// plane halves the largest chunk so far): chunk 0 keeps the existing body,
+// every other chunk gets a new box body at its place in the world with the
+// parent's velocity. Call after
 // RagdollSplitIslands (so the body's vertices are single-bone) and run
 // RagdollSplitIslands again afterwards to close the new seams. Returns the
 // number of fragment bodies created.
@@ -257,11 +282,13 @@ UBOOL RagdollForceBoxes( UObject* Obj );
 void RagdollBuildMeshAdjacency( URagdollMesh* Mesh );
 
 // Gore mesh surgery (RagdollGore.cpp). RagdollSplitIslands re-partitions the
-// skinned mesh along the current Cut[] joints: every vertex is re-bound to its
-// own island only, faces straddling two islands are duplicated per side with
-// the foreign vertices copied and bound to the near side, and each resulting
-// rim is fan-capped from the cut centroid with the wound material. Safe to
-// call repeatedly (later cuts only touch faces straddling the new cut).
+// skinned mesh along the current Cut[] joints: every vertex is assigned to an
+// island (dominant bone, refined by the cut planes) and re-bound to that
+// island only, faces straddling two islands are CLIPPED against the plane
+// separating them (new vertices on the plane, each side keeps its part) or,
+// where no plane separates them, duplicated per side, and every planar rim
+// is fan-capped from its centroid with the wound material. Safe to call
+// repeatedly (later cuts only touch faces straddling the new cut).
 // RagdollRemoveIsland deletes every face of the island rooted at 'Root' and
 // destroys its bodies (used for decapitation: the stock head chunk is the
 // visible head). Both are no-ops for box-mannequin corpses.
@@ -271,11 +298,13 @@ void RagdollRemoveIsland( FRagdollState& S, INT Root );
 // The dark-red wound texture used for stump caps (created once, rooted).
 UTexture* RagdollCapTexture();
 
-// Paint a wound into the corpse's skin at the mesh face nearest HitLocation.
-// The skin slot's texture is copied per corpse on first use (P8 only) and
-// the blotch is blended into every mip; style (size, colour, speckle,
-// scatter) follows the damage type name and the damage amount.
-void RagdollPaintWound( FRagdollState& S, class ARagdollCarcass* C, const FVector& HitLocation, INT Damage, const TCHAR* DamageType );
+// Paint a wound into the corpse's skin at the mesh face the shot marks: the
+// face nearest the ray (HitLocation, Dir), entry side preferred, or the face
+// nearest HitLocation when Dir is zero. The skin slot's texture is copied per
+// corpse on first use (P8 only) and the blotch is blended into every mip;
+// style (size, colour, speckle, scatter) follows the damage type name and
+// the damage amount.
+void RagdollPaintWound( FRagdollState& S, class ARagdollCarcass* C, const FVector& HitLocation, const FVector& Dir, INT Damage, const TCHAR* DamageType );
 
 // Real-mesh factory (UnRagdollMesh.cpp). Builds a URagdollMesh from the
 // precomputed dataset for the owning carcass's player mesh (ULodMesh), filling

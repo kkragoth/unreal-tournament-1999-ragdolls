@@ -117,7 +117,7 @@ native function int    Gib(int Damage, vector HitLocation);    // partial/total 
 native function vector GetBodyLocation(int Body);
 native function int    NearestBody(vector Loc);
 native function bool   BodyAttached(int Body);
-native function        PaintWound(vector HitLocation, int Damage, name DamageType); // skin mark, style per damage type
+native function        PaintWound(vector HitLocation, vector Dir, int Damage, name DamageType); // skin mark along the shot, style per damage type
 
 // Projectiles and hitscan call TakeDamage on the corpse. We translate the
 // hit into a Box3D impulse on the bodies near the impact point. The base
@@ -142,7 +142,7 @@ function TakeDamage(int Damage, Pawn instigatedBy, Vector hitlocation, Vector mo
 	{
 		if ( BloodHitClass != None )
 			Spawn(BloodHitClass,,, hitlocation, rotator(momentum));
-		PaintWound(hitlocation, Damage, damageType);
+		PaintWound(hitlocation, momentum, Damage, damageType);   // every hit on the corpse, not only the kill
 	}
 
 	Scaled = Damage;
@@ -495,7 +495,7 @@ function ApplyDeathGore(Pawn P)
 		return;
 	LastHitLocation = HitLoc;
 	LastHitMomentum = Mom;
-	PaintWound(HitLoc, Dmg, Type);
+	PaintWound(HitLoc, Mom, Dmg, Type);
 	if ( GoreLevel < 2 )
 		return;
 	Overkill = -P.Health;

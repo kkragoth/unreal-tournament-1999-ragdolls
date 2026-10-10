@@ -1233,19 +1233,21 @@ void ARagdollCarcass::execBodyAttached( FFrame& Stack, RESULT_DECL )
 	unguard;
 }
 
-// PaintWound(HitLocation, Damage, DamageType): persistent wound mark in the
-// corpse's skin at the hit (style per weapon damage type).
+// PaintWound(HitLocation, Dir, Damage, DamageType): persistent wound mark in
+// the corpse's skin where the shot (HitLocation along Dir, usually the hit
+// momentum) meets the skin; Dir = 0 marks the face nearest HitLocation.
 void ARagdollCarcass::execPaintWound( FFrame& Stack, RESULT_DECL )
 {
 	guard(ARagdollCarcass::execPaintWound);
 	P_GET_VECTOR( HitLocation );
+	P_GET_VECTOR( Dir );
 	P_GET_INT( Damage );
 	P_GET_NAME( DamageType );
 	P_FINISH;
 	FRagdollState* S = GetRagdollStates().Find( this );
 	if( !S || !S->bBuilt )
 		return;
-	RagdollPaintWound( *S, this, HitLocation, Damage, *DamageType );
+	RagdollPaintWound( *S, this, HitLocation, Dir, Damage, *DamageType );
 	unguard;
 }
 

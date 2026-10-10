@@ -63,17 +63,27 @@ in height and checked for non-adjacent overlap in `build_rig_mixamo.py`
 
 ## Gore (dismemberment / decapitation / gibbing)
 
-NEXT SESSION: read `docs/handoff-2026-10-10-gore.md` first (playtest
-feedback: stump caps must become planar clipped cuts; per-model rigging).
+NEXT SESSION: read `docs/handoff-2026-10-10-gore.md` first (planar cuts
+are DONE and deployed but not yet playtested; per-model rigging is open).
 
 Implemented 2026-10-10 per `docs/plans/gore.md` (read its "Implementation
 notes" first). Natives `Dismember` / `RemovePart` / `Gib` /
 `GetBodyLocation` / `NearestBody` / `BodyAttached` live in
 `RagdollCarcass.cpp`; the skin split + stump caps in
-`RagdollPkg/Src/RagdollGore.cpp` (generic island closure over the cut
-joints, runtime dark-red cap texture on material slot 7). Script triggers are
-in `RagdollCarcass.uc` (`ApplyDeathGore`, `TakeDamage`, `ChunkUp`) with the
-killing blow recorded by `RagdollMutator.MutatorTakeDamage`. Knobs
+`RagdollPkg/Src/RagdollGore.cpp`: every cut is a PLANE fitted to the
+heat-weight seam ring (NOT the skeleton anchor: the shoulders sit above the
+neck anchor on every model, see `docs/gore-planar-cut-findings.md`), seam
+faces are clipped against it and the planar rim is fan-capped flat with a
+dark cap texture (material slot 7); fragments are random planes. Fused
+regions (armpit, collar) fall back to duplicated skirts with small caps.
+Verify seam changes offline first: `tools/plane_cut.py` (parses
+`RagdollDatasets.h`, same algorithm) + `tools/render_groups.py` with
+ABSOLUTE paths (`RG_RES=1400` for close-ups). Wound marks (`PaintWound`)
+take the shot direction and mark the skin face along that ray (corpse hits
+land on the collision cylinder, far from a lying corpse's skin). Script
+triggers are in `RagdollCarcass.uc` (`ApplyDeathGore`, `TakeDamage`,
+`ChunkUp`) with the killing blow recorded by
+`RagdollMutator.MutatorTakeDamage`. Knobs
 (globalconfig, console-settable): `GoreLevel` (0 off, 1 decap+gib, 2 limbs;
 default 2), `DismemberScale` (threshold multiplier). The package still
 depends on Engine only: Botpack classes are `DynamicLoadObject`ed.

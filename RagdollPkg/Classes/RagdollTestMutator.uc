@@ -72,10 +72,10 @@ function Timer()
 		switch ( Sweeps % 4 )
 		{
 			case 1:
-				R.PaintWound(R.GetBodyLocation(1) + vect(0,-8,0), 17, 'shot');
-				R.PaintWound(R.GetBodyLocation(8), 30, 'shredded');
-				R.PaintWound(R.GetBodyLocation(3), 70, 'exploded');
-				R.PaintWound(R.GetBodyLocation(5), 40, 'jolted');
+				R.PaintWound(R.GetBodyLocation(1) + vect(0,-80,0), vect(0,1,0), 17, 'shot');   // along a ray from 80 UU away
+				R.PaintWound(R.GetBodyLocation(8), vect(0,0,0), 30, 'shredded');
+				R.PaintWound(R.GetBodyLocation(3) + vect(0,0,60), vect(0,0,-1), 70, 'exploded');
+				R.PaintWound(R.GetBodyLocation(5), vect(0,0,0), 40, 'jolted');
 				Log("RagdollTestMutator: Dismember forearmL -> " $ R.Dismember(6, vect(0,0,300)) $ " attached=" $ R.BodyAttached(6) $ " loc=" $ R.GetBodyLocation(6), 'RagdollTest');
 				Log("RagdollTestMutator: Dismember thighR -> " $ R.Dismember(9, vect(200,0,300)), 'RagdollTest');
 				break;

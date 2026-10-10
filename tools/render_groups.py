@@ -3,7 +3,7 @@
 #   view: front | 3q | side | back
 # Each OBJ's objects are colored by their name ("armL", "armR", "rest",
 # "Bone_<i>_..." or anything else) so segmentation / skinning is visible.
-import bpy, sys
+import bpy, sys, os
 from mathutils import Vector
 
 argv = sys.argv[sys.argv.index("--") + 1:]
@@ -14,7 +14,7 @@ scene = bpy.context.scene
 
 PAL = {"armL": (0.95, 0.3, 0.3), "armR": (0.3, 0.4, 0.95), "rest": (0.75, 0.75, 0.75),
        "legL": (0.95, 0.65, 0.2), "legR": (0.2, 0.9, 0.6), "head": (0.95, 0.95, 0.3),
-       "torso": (0.7, 0.7, 0.7), "pelvis": (0.6, 0.4, 0.9)}
+       "torso": (0.7, 0.7, 0.7), "pelvis": (0.6, 0.4, 0.9), "cap": (0.45, 0.03, 0.03)}
 BONES = [(0.95, 0.3, 0.3), (0.3, 0.95, 0.3), (0.3, 0.3, 0.95), (0.95, 0.95, 0.2),
          (1, 0.55, 0), (1, 0.15, 0.5), (0.55, 1, 0), (0, 1, 1), (0.65, 0.35, 1),
          (0.95, 0.65, 0.2), (0.2, 0.95, 0.65), (0.9, 0.2, 0.85), (0.55, 0.55, 0.55),
@@ -71,8 +71,9 @@ scene.display.shading.light = "STUDIO"
 scene.display.shading.show_backface_culling = False
 W = ext.x if view in ("front", "back") else ext.y if view == "side" else ext.length
 aspect = max(0.5, min(4.0, (W + 10) / (ext.z + 10)))
-scene.render.resolution_y = 700
-scene.render.resolution_x = int(700 * aspect)
+RES = int(os.environ.get("RG_RES", "700"))   # image height in px
+scene.render.resolution_y = RES
+scene.render.resolution_x = int(RES * aspect)
 scene.render.image_settings.file_format = "PNG"
 
 cam = bpy.data.objects.new("Cam", bpy.data.cameras.new("C"))

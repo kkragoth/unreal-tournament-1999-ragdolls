@@ -23,7 +23,23 @@ Headless verification of all of it: `ucc server` + `RagdollTestMutator`
 (see AGENTS.md "Gore" for the `subst` trick). The user playtested the
 deployed build once (screenshot below) and gave two pieces of feedback.
 
-## Feedback 1 (MUST FIX): the stump caps look "triangulated and sticking out"
+## STATUS UPDATE (2026-10-10, later): Feedback 1 is implemented and deployed
+
+Planar cuts are in `RagdollGore.cpp` (DLL + `.u` deployed to both installs,
+headless-verified: forearm/thigh/hip/knee/spine cuts 100% planar, full gib
+279 planar / 59 fallback seam faces on the Commando). The plan below said
+"cut plane at the joint anchor"; that was WRONG for the neck and shoulders
+(the shoulders are above the neck anchor on every model), the plane is now
+fitted to the heat-weight seam ring instead - read
+`docs/gore-planar-cut-findings.md`. Also done: darker cap texture, wound
+marks painted along the shot direction (user: "wound painting should also
+work if I already shoot the ragdoll, not only on initial death" - script
+already did, the hit point was the problem). NOT yet playtested in the
+renderer: check cap colour, the armpit fallback patch on torn-off arms, and
+`RagdollPkg: wound ... ray=1` lines for corpse hits in the log.
+Feedback 2 (per-model rigging) is still open.
+
+## Feedback 1 (ORIGINAL, now fixed): the stump caps look "triangulated and sticking out"
 
 Screenshot: a gibbed Commando trunk on Deck16; every cut shows a large,
 bright, flat-red FAN of triangles - on the shoulder stump, and one spread
