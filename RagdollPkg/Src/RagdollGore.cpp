@@ -682,6 +682,304 @@ INT RagdollFragmentBody( FRagdollState& S, INT Body, INT K, FLOAT DrawScale )
 }
 
 /*-----------------------------------------------------------------------------
+	Wound painting.
+-----------------------------------------------------------------------------*/
+
+// Current world position of a skinned vertex (same blend as GetFrame).
+static FVector VertWorld( const FRagdollState& S, INT v, FLOAT DrawScale )
+{
+	const FRagdollVertexBind& B = S.VertBinds( v );
+	FVector Pos( 0, 0, 0 );
+	for( INT k=0; k<3; k++ )
+	{
+		if( B.Weight[k] <= 0.0f )
+			break;
+		b3WorldTransform T = b3Body_GetTransform( RagdollBody( S, B.Bone[k] ) );
+		FVector Center( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
+		b3Vec3 R = b3RotateVector( T.q, { B.Off[k].X * DrawScale, B.Off[k].Y * DrawScale, B.Off[k].Z * DrawScale } );
+		Pos += ( Center + FVector( R.x, R.y, R.z ) ) * B.Weight[k];
+	}
+	return Pos;
+}
+
+// Per-corpse writable copy of the texture in skin slot t (NULL when the
+// source is not a plain palettised texture).
+static UTexture* EnsureWoundSkin( FRagdollState& S, ARagdollCarcass* C, URagdollMesh* M, INT t )
+{
+	guard(EnsureWoundSkin);
+	if( t < 0 || t >= 8 )
+		return NULL;
+	if( S.WoundSkins[t] )
+		return S.WoundSkins[t];
+	UTexture* Src = M->GetTexture( t, C );
+	if( !Src || Src->Format != TEXF_P8 || !Src->Palette || Src->Mips.Num() == 0 || Src->AnimNext )
+	{
+		debugf( TEXT("RagdollPkg: wound skin slot=%i unusable src=%s fmt=%i pal=%i mips=%i"), t,
+			Src ? Src->GetName() : TEXT("none"), Src ? (INT)Src->Format : -1, Src ? ( Src->Palette != NULL ) : 0, Src ? Src->Mips.Num() : 0 );
+		return NULL;
+	}
+	UTexture* Copy = ConstructObject<UTexture>( UTexture::StaticClass(), UObject::GetTransientPackage(), NAME_None, RF_Public );
+	if( !Copy )
+		return NULL;
+	Copy->Format   = Src->Format;
+	Copy->Palette  = Src->Palette;
+	Copy->UBits    = Src->UBits;
+	Copy->VBits    = Src->VBits;
+	Copy->USize    = Src->USize;
+	Copy->VSize    = Src->VSize;
+	Copy->UClamp   = Src->UClamp;
+	Copy->VClamp   = Src->VClamp;
+	Copy->MipZero  = Src->MipZero;
+	Copy->MaxColor = Src->MaxColor;
+	Copy->PolyFlags = Src->PolyFlags;
+	Copy->Diffuse  = Src->Diffuse;
+	Copy->Specular = Src->Specular;
+	Copy->Alpha    = Src->Alpha;
+	Copy->Scale    = Src->Scale;
+	Copy->LODSet   = Src->LODSet;
+	Copy->bHighColorQuality   = Src->bHighColorQuality;
+	Copy->bHighTextureQuality = Src->bHighTextureQuality;
+	Copy->Mips.Empty();
+	for( INT i=0; i<Src->Mips.Num(); i++ )
+	{
+		FMipmap& SM = Src->Mips( i );
+		SM.DataArray.Load();
+		new( Copy->Mips ) FMipmap( SM.UBits, SM.VBits );
+		FMipmap& DM = Copy->Mips( i );
+		const INT N = Min( SM.DataArray.Num(), DM.DataArray.Num() );
+		if( N > 0 )
+			appMemcpy( &DM.DataArray( 0 ), &SM.DataArray( 0 ), N );
+	}
+	Copy->bRealtimeChanged = 1;
+	C->MultiSkins[t] = Copy;
+	if( M->Textures.IsValidIndex( t ) )
+		M->Textures( t ) = Copy;
+	S.WoundSkins[t] = Copy;
+	debugf( TEXT("RagdollPkg: wound skin copy slot=%i src=%s %ix%i mips=%i"), t, Src->GetName(), Src->USize, Src->VSize, Src->Mips.Num() );
+	return Copy;
+	unguard;
+}
+
+static BYTE BestPaletteMatch( UPalette* Pal, const FColor& Want )
+{
+	INT Best = 1, BestD = 0x7fffffff;
+	const INT N = Min( Pal->Colors.Num(), 256 );
+	for( INT i=1; i<N; i++ )   // index 0 is the masked/transparent entry
+	{
+		const FColor& Cc = Pal->Colors( i );
+		const INT dr = (INT)Cc.R - Want.R, dg = (INT)Cc.G - Want.G, db = (INT)Cc.B - Want.B;
+		const INT D = dr*dr + dg*dg + db*db;
+		if( D < BestD ) { BestD = D; Best = i; }
+	}
+	return (BYTE)Best;
+}
+
+static FLOAT ClampF( FLOAT V, FLOAT Lo, FLOAT Hi )
+{
+	return V < Lo ? Lo : ( V > Hi ? Hi : V );
+}
+
+struct FWoundStyle
+{
+	FLOAT  Radius;     // texels at a 256-wide skin
+	FColor Color;      // blend target
+	FLOAT  Strength;   // 0..1 blend toward Color at the centre
+	FLOAT  Edge;       // 0 = hard disc, 1 = very soft/speckled rim
+	INT    Blobs;      // number of blobs (shrapnel scatter)
+	FLOAT  Scatter;    // texel spread of the extra blobs
+};
+
+static FWoundStyle WoundStyleFor( const TCHAR* Type, INT Damage )
+{
+	FWoundStyle W;
+	W.Radius = 3.0f; W.Color = FColor( 70, 8, 6 ); W.Strength = 0.8f; W.Edge = 0.6f; W.Blobs = 1; W.Scatter = 0.0f;
+	const FLOAT D = (FLOAT)Max( Damage, 1 );
+	if( !Type || !*Type )
+		return W;
+	if( !appStricmp( Type, TEXT("shot") ) )
+	{
+		// Bullets: minigun (7-9) pinpricks, enforcer (17) small holes,
+		// sniper (45) a proper entry wound.
+		W.Radius   = ClampF( 1.5f + D / 12.0f, 1.5f, 5.5f );
+		W.Strength = 0.9f;
+		W.Edge     = 0.4f;
+	}
+	else if( !appStricmp( Type, TEXT("shredded") ) )
+	{
+		// Flak chunks / ripper blades: a cluster of small ragged cuts.
+		W.Radius   = ClampF( 1.5f + D / 20.0f, 1.5f, 3.5f );
+		W.Blobs    = 3 + ( Damage > 25 ? 2 : 0 );
+		W.Scatter  = 7.0f;
+		W.Edge     = 0.8f;
+		W.Strength = 0.85f;
+	}
+	else if( !appStricmp( Type, TEXT("exploded") ) || !appStricmp( Type, TEXT("RedeemerDeath") ) )
+	{
+		// Rocket / flak shell / redeemer: broad scorched blotch.
+		W.Radius   = ClampF( 5.0f + D / 12.0f, 5.0f, 13.0f );
+		W.Color    = FColor( 28, 14, 10 );
+		W.Strength = 0.7f;
+		W.Edge     = 0.9f;
+		W.Blobs    = 2;
+		W.Scatter  = 5.0f;
+	}
+	else if( !appStricmp( Type, TEXT("jolted") ) || !appStricmp( Type, TEXT("zapped") ) )
+	{
+		// Shock / pulse: medium electrical burn, nearly black.
+		W.Radius   = ClampF( 3.5f + D / 15.0f, 3.5f, 8.0f );
+		W.Color    = FColor( 18, 12, 20 );
+		W.Strength = 0.75f;
+		W.Edge     = 0.7f;
+	}
+	else if( !appStricmp( Type, TEXT("burned") ) )
+	{
+		W.Radius   = ClampF( 4.0f + D / 12.0f, 4.0f, 9.0f );
+		W.Color    = FColor( 20, 12, 8 );
+		W.Strength = 0.8f;
+		W.Edge     = 0.8f;
+	}
+	else if( !appStricmp( Type, TEXT("corroded") ) )
+	{
+		// Bio rifle: green acid splatter, speckled.
+		W.Radius   = ClampF( 3.0f + D / 10.0f, 3.0f, 9.0f );
+		W.Color    = FColor( 40, 110, 30 );
+		W.Strength = 0.7f;
+		W.Edge     = 0.9f;
+		W.Blobs    = 2;
+		W.Scatter  = 5.0f;
+	}
+	else if( !appStricmp( Type, TEXT("pounded") ) )
+	{
+		// Impact hammer: big bruise-like wound.
+		W.Radius   = ClampF( 5.0f + D / 15.0f, 5.0f, 9.0f );
+		W.Color    = FColor( 60, 6, 10 );
+		W.Strength = 0.75f;
+		W.Edge     = 0.5f;
+	}
+	else if( !appStricmp( Type, TEXT("Decapitated") ) )
+	{
+		W.Radius   = 6.0f;
+		W.Strength = 0.9f;
+		W.Edge     = 0.5f;
+	}
+	return W;
+}
+
+static void PaintBlob( UTexture* Tex, FLOAT U, FLOAT V, const FWoundStyle& W, FLOAT RadiusScale )
+{
+	UPalette* Pal = Tex->Palette;
+	for( INT i=0; i<Tex->Mips.Num(); i++ )
+	{
+		FMipmap& Mip = Tex->Mips( i );
+		if( Mip.DataArray.Num() < Mip.USize * Mip.VSize )
+			continue;
+		// UV bytes span the whole texture whatever its size.
+		const FLOAT cx = U * Mip.USize / 256.0f;
+		const FLOAT cy = V * Mip.VSize / 256.0f;
+		const FLOAT r  = Max( W.Radius * RadiusScale * Mip.USize / 256.0f, 0.75f );
+		const INT ir = appCeil( r );
+		for( INT dy=-ir; dy<=ir; dy++ )
+			for( INT dx=-ir; dx<=ir; dx++ )
+			{
+				const FLOAT d = appSqrt( (FLOAT)( dx*dx + dy*dy ) ) / r;
+				if( d > 1.0f )
+					continue;
+				// Soft / speckled rim: outer texels are painted with falling
+				// probability so the edge is ragged rather than a stamped disc.
+				if( appFrand() < d * d * W.Edge )
+					continue;
+				const INT x = ( appFloor( cx ) + dx ) & ( Mip.USize - 1 );
+				const INT y = ( appFloor( cy ) + dy ) & ( Mip.VSize - 1 );
+				BYTE& Px = Mip.DataArray( y * Mip.USize + x );
+				const FColor Old = Pal->Colors( Px );
+				const FLOAT a = W.Strength * ( 1.0f - 0.45f * d );
+				FColor Want(
+					(BYTE)Clamp( appRound( Old.R + ( W.Color.R - Old.R ) * a ), 0, 255 ),
+					(BYTE)Clamp( appRound( Old.G + ( W.Color.G - Old.G ) * a ), 0, 255 ),
+					(BYTE)Clamp( appRound( Old.B + ( W.Color.B - Old.B ) * a ), 0, 255 ), 255 );
+				Px = BestPaletteMatch( Pal, Want );
+			}
+	}
+	Tex->bRealtimeChanged = 1;
+}
+
+void RagdollPaintWound( FRagdollState& S, ARagdollCarcass* C, const FVector& Hit, INT Damage, const TCHAR* DamageType )
+{
+	guard(RagdollPaintWound);
+	if( !S.bBuilt || !MeshIsSkinned( S ) || !C )
+		return;
+	URagdollMesh* M = S.Mesh;
+	const FLOAT DS = C->DrawScale > 0.0f ? C->DrawScale : 1.0f;
+
+	// Nearest face to the hit (hitscan hits land on the collision cylinder,
+	// so allow a generous distance but give up on far misses).
+	TArray<FVector> W;
+	W.Add( M->FrameVerts );
+	for( INT v=0; v<M->FrameVerts; v++ )
+		W( v ) = VertWorld( S, v, DS );
+	INT BestF = -1, BestW = -1;
+	FLOAT BestD = 1e30f;
+	for( INT f=0; f<M->Faces.Num(); f++ )
+	{
+		const FMeshFace& F = M->Faces( f );
+		if( S.CapMaterial >= 0 && F.MaterialIndex == S.CapMaterial )
+			continue;
+		FVector Cen( 0, 0, 0 );
+		for( INT k=0; k<3; k++ )
+			Cen += W( M->Wedges( F.iWedge[k] ).iVertex );
+		Cen /= 3.0f;
+		const FLOAT D = FDistSquared( Cen, Hit );
+		if( D < BestD ) { BestD = D; BestF = f; }
+	}
+	if( BestF < 0 || BestD > 45.0f * 45.0f )
+	{
+		debugf( TEXT("RagdollPkg: wound %s miss: nearest face %i at %.0f UU"), C->GetName(), BestF, BestF >= 0 ? appSqrt( BestD ) : -1.0f );
+		return;
+	}
+	const FMeshFace& F = M->Faces( BestF );
+	FLOAT BestVD = 1e30f;
+	for( INT k=0; k<3; k++ )
+	{
+		const FLOAT D = FDistSquared( W( M->Wedges( F.iWedge[k] ).iVertex ), Hit );
+		if( D < BestVD ) { BestVD = D; BestW = F.iWedge[k]; }
+	}
+	if( !M->Materials.IsValidIndex( F.MaterialIndex ) )
+		return;
+	const INT t = M->Materials( F.MaterialIndex ).TextureIndex;
+	if( t == 7 )
+		return;
+	UTexture* Tex = EnsureWoundSkin( S, C, M, t );
+	if( !Tex )
+		return;
+
+	const FWoundStyle Style = WoundStyleFor( DamageType, Damage );
+	const FMeshWedge& Wd = M->Wedges( BestW );
+	// Blend the UV a little toward the face centre so the mark sits on the
+	// triangle rather than exactly on a vertex / UV seam.
+	FLOAT U = Wd.TexUV.U, V = Wd.TexUV.V;
+	{
+		FLOAT su = 0, sv = 0;
+		for( INT k=0; k<3; k++ ) { su += M->Wedges( F.iWedge[k] ).TexUV.U; sv += M->Wedges( F.iWedge[k] ).TexUV.V; }
+		U = U * 0.6f + ( su / 3.0f ) * 0.4f;
+		V = V * 0.6f + ( sv / 3.0f ) * 0.4f;
+	}
+	PaintBlob( Tex, U, V, Style, 1.0f );
+	for( INT b=1; b<Style.Blobs; b++ )
+	{
+		const FLOAT A = appFrand() * 2.0f * PI, R = Style.Scatter * ( 0.4f + appFrand() * 0.6f );
+		PaintBlob( Tex, U + appCos( A ) * R, V + appSin( A ) * R, Style, 0.5f + appFrand() * 0.5f );
+	}
+	static INT GWoundDbg = 0;
+	if( GWoundDbg < 12 )
+	{
+		GWoundDbg++;
+		debugf( TEXT("RagdollPkg: wound %s type=%s dmg=%i face=%i d=%.0f slot=%i uv=(%.0f,%.0f) r=%.1f blobs=%i"),
+			C->GetName(), DamageType ? DamageType : TEXT(""), Damage, BestF, appSqrt( BestD ), t, U, V, Style.Radius, Style.Blobs );
+	}
+	unguard;
+}
+
+/*-----------------------------------------------------------------------------
 	Island removal (decapitation).
 -----------------------------------------------------------------------------*/
 

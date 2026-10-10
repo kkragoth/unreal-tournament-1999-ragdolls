@@ -265,6 +265,22 @@ the first playtest.
   cadence, 60%), then a `UTBloodPool2` decal at the part's position with
   `rot(16384,0,0)` (the orientation stock uses for floor landings; if the
   decal never shows, the native trace direction is the other way).
+- **Wound marks** (`RagdollPaintWound`, native `PaintWound(HitLocation,
+  Damage, DamageType)`): persistent marks painted into the skin itself. On
+  the first wound in a skin slot the slot's texture (P8 only) is copied into
+  a per-corpse transient texture (shared palette, all mips) and assigned to
+  `MultiSkins[slot]` / `Textures(slot)`; the mark is blended into every mip
+  at the UV of the mesh face nearest the hit (nearest face centroid, max
+  45 UU since hitscan hits land on the collision cylinder), palette
+  best-match per texel, `bRealtimeChanged` so the renderer re-uploads.
+  Style per damage type: `shot` small round hole sized by damage (minigun
+  r1.5-2.3, enforcer 2.9, sniper 5.3 texels on 256), `shredded` 3-5
+  scattered small ragged cuts, `exploded`/`RedeemerDeath` broad scorched
+  blotch (r5-13, dark brown), `jolted`/`zapped` near-black burn, `burned`
+  char, `corroded` green speckled splatter, `pounded` large bruise,
+  `Decapitated` r6. Painted for the killing blow (from the mutator record)
+  and every hit on the corpse. Hits on the living pawn before the kill are
+  not painted (their world locations no longer map onto the corpse).
 - **Config**: `GoreLevel` (default 2) and `DismemberScale` (default 1),
   globalconfig on `RagdollCarcass`, console-settable like the physics knobs.
 - Headless numbers (Commando): forearm cut 22 seam faces / 22 caps

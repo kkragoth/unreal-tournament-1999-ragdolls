@@ -115,6 +115,10 @@ struct FRagdollState
 
 	// Fragment bodies (see RAGDOLL_MAX_EXTRA). ExtraCenter is the fragment's
 	// bind-space centre (UU, DrawScale=1), ExtraRadius its bounding radius.
+	// Per-corpse copies of the skin textures that wounds are painted into
+	// (one per MultiSkins slot, made lazily on the first wound in that slot).
+	UTexture* WoundSkins[8];
+
 	INT       NumExtra;
 	b3BodyId  ExtraBodies[RAGDOLL_MAX_EXTRA];
 	FVector   ExtraCenter[RAGDOLL_MAX_EXTRA];
@@ -126,6 +130,8 @@ struct FRagdollState
 	, SpawnYaw( 0 ), SpawnPitch( 0 ), bHasDeathPose( 0 )
 	, Dataset( NULL ), CapMaterial( -1 ), NumSplits( 0 ), NumExtra( 0 )
 	{
+		for( INT t=0; t<8; t++ )
+			WoundSkins[t] = NULL;
 		for( INT e=0; e<RAGDOLL_MAX_EXTRA; e++ )
 		{
 			ExtraBodies[e] = b3_nullBodyId;
@@ -264,6 +270,12 @@ void RagdollRemoveIsland( FRagdollState& S, INT Root );
 
 // The dark-red wound texture used for stump caps (created once, rooted).
 UTexture* RagdollCapTexture();
+
+// Paint a wound into the corpse's skin at the mesh face nearest HitLocation.
+// The skin slot's texture is copied per corpse on first use (P8 only) and
+// the blotch is blended into every mip; style (size, colour, speckle,
+// scatter) follows the damage type name and the damage amount.
+void RagdollPaintWound( FRagdollState& S, class ARagdollCarcass* C, const FVector& HitLocation, INT Damage, const TCHAR* DamageType );
 
 // Real-mesh factory (UnRagdollMesh.cpp). Builds a URagdollMesh from the
 // precomputed dataset for the owning carcass's player mesh (ULodMesh), filling

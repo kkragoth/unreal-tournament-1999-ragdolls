@@ -39,6 +39,7 @@ public:
     DECLARE_FUNCTION(execGetBodyLocation);
     DECLARE_FUNCTION(execNearestBody);
     DECLARE_FUNCTION(execBodyAttached);
+    DECLARE_FUNCTION(execPaintWound);
     DECLARE_CLASS(ARagdollCarcass,ACarcass,0,RagdollPkg)
     NO_DEFAULT_CONSTRUCTOR(ARagdollCarcass)
 };
@@ -58,6 +59,7 @@ AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execGib);
 AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execGetBodyLocation);
 AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execNearestBody);
 AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execBodyAttached);
+AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execPaintWound);
 
 #ifndef NAMES_ONLY
 #undef AUTOGENERATE_NAME

@@ -62,12 +62,20 @@ function Timer()
 		R.SimFreq = 50.0;
 		R.SimSubSteps = 4;
 		R.Mesh = Mesh(DynamicLoadObject("Botpack.Commando", class'Mesh'));
+		R.MultiSkins[0] = Texture(DynamicLoadObject("CommandoSkins.cmdo1", class'Texture'));
+		R.MultiSkins[1] = Texture(DynamicLoadObject("CommandoSkins.cmdo2", class'Texture'));
+		R.MultiSkins[2] = Texture(DynamicLoadObject("CommandoSkins.cmdo3", class'Texture'));
+		R.MultiSkins[3] = Texture(DynamicLoadObject("CommandoSkins.cmdo4", class'Texture'));
 		R.BuildRagdoll();
 		R.LoadGoreClasses();
 		Log("RagdollTestMutator: direct RagdollCarcass " $ R $ " at " $ R.Location $ " mesh=" $ R.Mesh, 'RagdollTest');
 		switch ( Sweeps % 4 )
 		{
 			case 1:
+				R.PaintWound(R.GetBodyLocation(1) + vect(0,-8,0), 17, 'shot');
+				R.PaintWound(R.GetBodyLocation(8), 30, 'shredded');
+				R.PaintWound(R.GetBodyLocation(3), 70, 'exploded');
+				R.PaintWound(R.GetBodyLocation(5), 40, 'jolted');
 				Log("RagdollTestMutator: Dismember forearmL -> " $ R.Dismember(6, vect(0,0,300)) $ " attached=" $ R.BodyAttached(6) $ " loc=" $ R.GetBodyLocation(6), 'RagdollTest');
 				Log("RagdollTestMutator: Dismember thighR -> " $ R.Dismember(9, vect(200,0,300)), 'RagdollTest');
 				break;

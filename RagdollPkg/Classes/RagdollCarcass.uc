@@ -117,6 +117,7 @@ native function int    Gib(int Damage, vector HitLocation);    // partial/total 
 native function vector GetBodyLocation(int Body);
 native function int    NearestBody(vector Loc);
 native function bool   BodyAttached(int Body);
+native function        PaintWound(vector HitLocation, int Damage, name DamageType); // skin mark, style per damage type
 
 // Projectiles and hitscan call TakeDamage on the corpse. We translate the
 // hit into a Box3D impulse on the bodies near the impact point. The base
@@ -137,8 +138,12 @@ function TakeDamage(int Damage, Pawn instigatedBy, Vector hitlocation, Vector mo
 	Body = ApplyDamageImpulse(hitlocation, momentum, Damage);
 	LastHitLocation = hitlocation;
 	LastHitMomentum = momentum;
-	if ( BloodHitClass != None && GoreAllowed() )
-		Spawn(BloodHitClass,,, hitlocation, rotator(momentum));
+	if ( GoreAllowed() )
+	{
+		if ( BloodHitClass != None )
+			Spawn(BloodHitClass,,, hitlocation, rotator(momentum));
+		PaintWound(hitlocation, Damage, damageType);
+	}
 
 	Scaled = Damage;
 	if ( damageType == 'shot' )
@@ -484,14 +489,15 @@ function ApplyDeathGore(Pawn P)
 		Decapitate(false);
 		return;
 	}
-	if ( GoreLevel < 2 )
-		return;
 	foreach AllActors(class'RagdollMutator', M)
 		break;
 	if ( M == None || !M.GetLastHit(P, 2.0, HitLoc, Mom, Type, Dmg) )
 		return;
 	LastHitLocation = HitLoc;
 	LastHitMomentum = Mom;
+	PaintWound(HitLoc, Dmg, Type);
+	if ( GoreLevel < 2 )
+		return;
 	Overkill = -P.Health;
 	Body = NearestBody(HitLoc);
 	bExplosive = (Type == 'exploded') || (Type == 'shredded') || (Type == 'RedeemerDeath')
