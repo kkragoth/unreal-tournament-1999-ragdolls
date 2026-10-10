@@ -13,6 +13,7 @@ set(RAGDOLLPKG_FILES_INC
 set(RAGDOLLPKG_FILES_SRC
     ${RAGDOLLPKG_SRC_PATH}/RagdollCarcass.cpp
     ${RAGDOLLPKG_SRC_PATH}/RagdollDatasets.cpp
+    ${RAGDOLLPKG_SRC_PATH}/RagdollGore.cpp
     ${RAGDOLLPKG_SRC_PATH}/UnRagdollGeometry.cpp
     ${RAGDOLLPKG_SRC_PATH}/UnRagdollMesh.h
     ${RAGDOLLPKG_SRC_PATH}/UnRagdollMesh.cpp)

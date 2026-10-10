@@ -61,6 +61,25 @@ from vertical) and ~doubled every joint range. Dataset body boxes are capped
 in height and checked for non-adjacent overlap in `build_rig_mixamo.py`
 (the spine box used to reach into the thigh boxes and jam the hips).
 
+## Gore (dismemberment / decapitation / gibbing)
+
+Implemented 2026-10-10 per `docs/plans/gore.md` (read its "Implementation
+notes" first). Natives `Dismember` / `RemovePart` / `Gib` /
+`GetBodyLocation` / `NearestBody` / `BodyAttached` live in
+`RagdollCarcass.cpp`; the skin split + stump caps in
+`RagdollPkg/Src/RagdollGore.cpp` (generic island closure over the cut
+joints, runtime dark-red cap texture on material slot 7). Script triggers are
+in `RagdollCarcass.uc` (`ApplyDeathGore`, `TakeDamage`, `ChunkUp`) with the
+killing blow recorded by `RagdollMutator.MutatorTakeDamage`. Knobs
+(globalconfig, console-settable): `GoreLevel` (0 off, 1 decap+gib, 2 limbs;
+default 2), `DismemberScale` (threshold multiplier). The package still
+depends on Engine only: Botpack classes are `DynamicLoadObject`ed.
+`RagdollSpawnNotify` intercepts ONLY `UTHumanCarcass` (chunks/heads keep
+stock behaviour). Headless check: `RagdollTestMutator` drives the gore
+natives on a `ucc server`; `ucc server` cannot run from a path with spaces,
+so `subst U: "<install>"` first and run `U:\System\UCC.exe server ...
+-log=ragdolltest.log` (remove with `subst U: /D`).
+
 ## Ragdoll real-mesh skinning (ON; runtime-toggleable)
 
 Real-mesh skinning is the default, gated at runtime by dataset availability

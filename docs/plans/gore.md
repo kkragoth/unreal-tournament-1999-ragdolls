@@ -1,6 +1,12 @@
 # Plan: gore system (decapitation, dismemberment, gibbing) on the Box3D ragdoll
 
-Status: **PLANNING** (2026-10-10). Written after the fifth-pass playtest
+Status: **IMPLEMENTED, NOT YET PLAYTESTED** (2026-10-10). All four tiers are
+in (`RagdollPkg/Src/RagdollGore.cpp`, gore natives in `RagdollCarcass.cpp`,
+script in `RagdollCarcass.uc` / `RagdollMutator.uc`), built, deployed to both
+installs and exercised headlessly (`ucc server` + `RagdollTestMutator`:
+Dismember / RemovePart / Gib on a Commando corpse, no crash, no script
+warnings). See "Implementation notes" at the end for what differs from the
+design below. Written after the fifth-pass playtest
 ("after a headshot there are 2 bodies", "rocket frag makes the corpse just
 disappear", "add limbs flying off etc., Soldier of Fortune 1 style").
 
@@ -191,3 +197,62 @@ Trigger rules:
   do not intercept `UTHeads`.
 - `ucc batchexport` on this install: run it from a game copy whose path has
   no spaces if the stock scripts are needed again locally.
+
+## 6. Implementation notes (2026-10-10)
+
+What was built, where it deviates from sections 3-4, and what to look at in
+the first playtest.
+
+- **Package stays Engine-only.** No Botpack compile-time references:
+  `CarcassType` is read with `GetPropertyText` (it lives on PlayerPawn/Bot,
+  not Pawn), the blood/organ/head classes and the gib sounds are
+  `DynamicLoadObject`ed by name in `LoadGoreClasses`, and the notify filter is
+  `IsA('UTHumanCarcass')`. Green blood is not supported (would need
+  `UT_Blood2.GreenBlood()`).
+- **Mesh seam = generic island closure** (`RagdollSplitIslands`): islands are
+  computed from the `Cut[]` joints (root of each body after removing cut
+  joints), every vertex is re-bound to its own island, each straddling face
+  is copied once per island present with the foreign vertices duplicated, and
+  the rim (foreign-foreign edges seen in exactly one seam face) is fan-capped
+  from the centroid of the duplicated vertices. One routine serves limb cuts,
+  repeated cuts and the full gib; no seam-loop tracing, so the old
+  weld-surgery pitfalls do not apply. Cap texture: a 16x16 palettised
+  dark-red noise texture created at runtime (`RagdollCapTexture`), material
+  slot 7 (`Textures(7)`; no UT model sets `MultiSkins[7]`).
+- **Decapitation removes the head** (`RemovePart`: faces deleted, body
+  destroyed, orphan verts parked on the neck) instead of keeping an invisible
+  head body. Stock `PlayDecap` deaths (anim `Dead4` male/boss, `Dead6`
+  female, bots included) keep the stock head chunk; our own decapitations
+  (head/neck nearest a strong hit, head part threshold) spawn
+  `UT_HeadMale` / `UT_HeadFemale` / `UT_bosshead` with `Initfor(self)`.
+- **Hit cylinder** only tracks bodies still attached to the pelvis island, so
+  a limb flung across the room cannot inflate the corpse's collision.
+  Detached parts are therefore not hittable (fine for now).
+- **Killing-blow rules** (`ApplyDeathGore`, `GoreLevel >= 2`): hit looked up
+  in `RagdollMutator` (registered via `RegisterDamageMutator`, 16-entry ring,
+  2 s max age); `'Decapitated'` -> decap; explosive types (`exploded`,
+  `shredded`, `RedeemerDeath`, `pounded`, `jolted`, `zapped`) with overkill
+  >= 15*DismemberScale, or `'shot'` with Damage >= 45 and overkill >= 5 ->
+  tear off the body nearest the hit (torso hits do nothing). Corpse hits:
+  stock gib thresholds first, else per-part accumulation (head/neck 40,
+  forearm/shin/foot 60, upper arm 70, thigh 90, `'shot'` at 40%).
+- **Gib**: `Gib()` cuts all joints and blasts radially (4..11.5 m/s with
+  damage), spawns `UT_BigBloodHit`, 2-3 `UT_BloodBurst`, one organ on high
+  detail, `LifeSpan=20`. Stock `UT_MaleTorso`/`UT_MaleArm`/`UT_Thigh` are not
+  spawned. With low gore the corpse is simply destroyed on ChunkUp.
+- **Blood**: `UT_BloodHit` per corpse hit, bursts at the cut, bursts
+  following a cut part for 2-3 s (`Bleed()` from the sim Timer, 0.15 s
+  cadence, 60%), then a `UTBloodPool2` decal at the part's position with
+  `rot(16384,0,0)` (the orientation stock uses for floor landings; if the
+  decal never shows, the native trace direction is the other way).
+- **Config**: `GoreLevel` (default 2) and `DismemberScale` (default 1),
+  globalconfig on `RagdollCarcass`, console-settable like the physics knobs.
+- Headless numbers (Commando): forearm cut 22 seam faces / 22 caps
+  (1292 -> 1316 verts), neck 42/42, full gib 315 seam / 311 caps
+  (1292 -> 1633 verts, 2568 -> 3196 faces).
+
+Playtest checklist: cap visibility/colour (slot-7 texture through the
+renderer), seam raggedness on arms vs legs, decapitated corpses show no head
+and one rolling stock head, rocket/flak kills gib into skinned parts, a
+corpse under minigun fire loses limbs then gibs, blood pool decals appear,
+no "Accessed None" in `UnrealTournament.log`.

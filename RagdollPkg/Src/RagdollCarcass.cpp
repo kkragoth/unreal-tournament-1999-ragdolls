@@ -144,7 +144,7 @@ static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FRagdollBone
 		J.enableMotor        = true;
 		J.maxMotorTorque     = Spec.Friction * GJointFrictionScale;
 		J.motorSpeed         = 0.0f;
-		b3CreateRevoluteJoint( S.World, &J );
+		S.Joints[BodyB] = b3CreateRevoluteJoint( S.World, &J );
 	}
 	else
 	{
@@ -162,7 +162,7 @@ static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FRagdollBone
 		J.enableMotor        = true;
 		J.maxMotorTorque     = Spec.Friction * GJointFrictionScale;
 		J.motorVelocity      = b3Vec3_zero;
-		b3CreateSphericalJoint( S.World, &J );
+		S.Joints[BodyB] = b3CreateSphericalJoint( S.World, &J );
 	}
 }
 
@@ -364,6 +364,7 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 		DS = FindRagdollDataset( LiveMesh->GetName() );
 	const FRagdollBoneDef* Defs = DS ? DS->Bones : GRagdollBoneDefs;
 	S.BoneDefs = Defs;
+	S.Dataset  = DS;
 	// Real-mesh skeletons skip the feet (foot verts are bound rigidly to the
 	// shins; a separate foot body is what scrambles the ankles). Box fallback
 	// keeps all 14.
@@ -453,6 +454,7 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 
 		S.RestPositions[i] = Bd.position;
 		S.RestRotations[i] = b3Quat_identity;
+		S.Alive[i] = 1;
 	}
 
 	// Joints. All ranges in radians. Spherical joints: cone half-angle about the
@@ -612,6 +614,11 @@ static void SyncRagdollImpl( ARagdollCarcass* C )
 		FLOAT MaxR = 20.0f, MaxUp = 20.0f, MaxDown = 20.0f;
 		for( INT i=0; i<S->NumBodies; i++ )
 		{
+			// Only bodies still attached to the pelvis island: a limb or gib
+			// flung across the room must not inflate the hit cylinder to cover
+			// the whole room (projectiles would detonate in mid-air).
+			if( !S->Alive[i] || RagdollIslandRoot( *S, i ) != BONE_Pelvis )
+				continue;
 			b3WorldTransform BT = b3Body_GetTransform( S->Bodies[i] );
 			const FRagdollBoneDef& D = Defs[i];
 			FLOAT E  = Max( Max( D.HX, D.HY ), D.HZ ) * DrawScale;
@@ -662,7 +669,7 @@ static void ShutdownRagdollImpl( ARagdollCarcass* C )
 		if( WorldStillValid )
 		{
 			for( INT i=0; i<S->NumBodies; i++ )
-				if( b3Body_IsValid( S->Bodies[i] ) )
+				if( S->Alive[i] && b3Body_IsValid( S->Bodies[i] ) )
 					b3DestroyBody( S->Bodies[i] );
 		}
 		S->bBuilt = false;
@@ -706,6 +713,25 @@ void ARagdollCarcass::execShutdownRagdoll( FFrame& Stack, RESULT_DECL )
 	ShutdownRagdollImpl( this );
 }
 
+// Nearest live body (by centre distance) to a world point; -1 without state.
+static INT NearestBodyImpl( const FRagdollState* S, const FVector& Loc )
+{
+	if( !S || !S->bBuilt )
+		return -1;
+	INT Closest = -1;
+	FLOAT ClosestD = 1e30f;
+	for( INT i=0; i<S->NumBodies; i++ )
+	{
+		if( !S->Alive[i] )
+			continue;
+		b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
+		FLOAT dx = T.p.x * RAGDOLL_M2U - Loc.X, dy = T.p.y * RAGDOLL_M2U - Loc.Y, dz = T.p.z * RAGDOLL_M2U - Loc.Z;
+		FLOAT D = dx*dx + dy*dy + dz*dz;
+		if( D < ClosestD ) { ClosestD = D; Closest = i; }
+	}
+	return Closest;
+}
+
 void ARagdollCarcass::execApplyDamageImpulse( FFrame& Stack, RESULT_DECL )
 {
 	guard(ARagdollCarcass::execApplyDamageImpulse);
@@ -715,6 +741,7 @@ void ARagdollCarcass::execApplyDamageImpulse( FFrame& Stack, RESULT_DECL )
 	P_FINISH;
 
 	FRagdollState* S = GetRagdollStates().Find( this );
+	*(INT*)Result = NearestBodyImpl( S, HitLocation );
 	if( !S || !S->bBuilt )
 	{
 		debugf( TEXT("RagdollPkg: dmg %s NO-STATE hit=(%.0f,%.0f,%.0f) dmg=%i"), GetName(), HitLocation.X, HitLocation.Y, HitLocation.Z, Damage );
@@ -745,14 +772,13 @@ void ARagdollCarcass::execApplyDamageImpulse( FFrame& Stack, RESULT_DECL )
 
 	// Diagnostic: report where the shot landed relative to the nearest body.
 	{
-		INT Closest = -1;
-		FLOAT ClosestD = 1e9f;
-		for( INT i=0; i<S->NumBodies; i++ )
+		INT Closest = *(INT*)Result;
+		FLOAT ClosestD = 0.0f;
+		if( Closest >= 0 )
 		{
-			b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
+			b3WorldTransform T = b3Body_GetTransform( S->Bodies[Closest] );
 			FLOAT dx = T.p.x - Hit.x, dy = T.p.y - Hit.y, dz = T.p.z - Hit.z;
-			FLOAT D = sqrt( dx*dx + dy*dy + dz*dz );
-			if( D < ClosestD ) { ClosestD = D; Closest = i; }
+			ClosestD = sqrt( dx*dx + dy*dy + dz*dz );
 		}
 		b3WorldTransform T0 = b3Body_GetTransform( S->Bodies[BONE_Pelvis] );
 		b3Vec3 V0 = b3Body_GetLinearVelocity( S->Bodies[BONE_Pelvis] );
@@ -776,6 +802,8 @@ void ARagdollCarcass::execApplyDamageImpulse( FFrame& Stack, RESULT_DECL )
 
 	for( INT i=0; i<S->NumBodies; i++ )
 	{
+		if( !S->Alive[i] )
+			continue;
 		b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
 		FLOAT dx = T.p.x - Hit.x, dy = T.p.y - Hit.y, dz = T.p.z - Hit.z;
 		FLOAT Dist  = sqrt( dx*dx + dy*dy + dz*dz );
@@ -859,6 +887,8 @@ void ARagdollCarcass::execWalkOverPush( FFrame& Stack, RESULT_DECL )
 
 	for( INT i=0; i<S->NumBodies; i++ )
 	{
+		if( !S->Alive[i] )
+			continue;
 		const FRagdollBoneDef& D = Defs[i];
 		const FLOAT HX = D.HX * Scale * RAGDOLL_U2M;
 		const FLOAT HY = D.HY * Scale * RAGDOLL_U2M;
@@ -921,6 +951,205 @@ void ARagdollCarcass::execSetDeathPose( FFrame& Stack, RESULT_DECL )
 	S.SpawnYaw      = Yaw;
 	S.SpawnPitch    = Pitch;
 	S.bHasDeathPose = true;
+	unguard;
+}
+
+/*-----------------------------------------------------------------------------
+	Gore: dismemberment / gibbing.
+-----------------------------------------------------------------------------*/
+
+// Destroy the joint holding 'Body' to its parent. Returns false when the body
+// is the pelvis, dead, or already detached.
+static UBOOL DetachBody( FRagdollState& S, INT Body )
+{
+	if( Body <= 0 || Body >= S.NumBodies || !S.Alive[Body] || S.Cut[Body] )
+		return 0;
+	if( b3Joint_IsValid( S.Joints[Body] ) )
+		b3DestroyJoint( S.Joints[Body], true );
+	S.Joints[Body] = b3_nullJointId;
+	S.Cut[Body]    = 1;
+	return 1;
+}
+
+// Kick every live body of the island rooted at 'Root': add DeltaV (m/s, with a
+// little per-body scatter) and a random spin so the part tumbles.
+static void KickIsland( FRagdollState& S, INT Root, const b3Vec3& DeltaV, FLOAT Spin )
+{
+	for( INT b=0; b<S.NumBodies; b++ )
+	{
+		if( !S.Alive[b] || RagdollIslandRoot( S, b ) != Root )
+			continue;
+		b3Vec3 V = b3Body_GetLinearVelocity( S.Bodies[b] );
+		const FLOAT Scatter = 0.85f + appFrand() * 0.3f;
+		V.x += DeltaV.x * Scatter;
+		V.y += DeltaV.y * Scatter;
+		V.z += DeltaV.z * Scatter;
+		b3Body_SetLinearVelocity( S.Bodies[b], V );
+		b3Vec3 W;
+		W.x = ( appFrand() * 2.0f - 1.0f ) * Spin;
+		W.y = ( appFrand() * 2.0f - 1.0f ) * Spin;
+		W.z = ( appFrand() * 2.0f - 1.0f ) * Spin;
+		b3Body_SetAngularVelocity( S.Bodies[b], W );
+	}
+}
+
+// Dismember(Body, Impulse): tear the subtree rooted at Body off the corpse.
+// Impulse is a velocity change in UU/s given to the detached part (child
+// joints are kept, so a forearm leaves with its hand, a thigh with its shin).
+// Returns true when a joint was actually cut.
+void ARagdollCarcass::execDismember( FFrame& Stack, RESULT_DECL )
+{
+	guard(ARagdollCarcass::execDismember);
+	P_GET_INT( Body );
+	P_GET_VECTOR( Impulse );
+	P_FINISH;
+	*(DWORD*)Result = 0;
+
+	FRagdollState* S = GetRagdollStates().Find( this );
+	if( !S || !S->bBuilt )
+		return;
+	if( !DetachBody( *S, Body ) )
+		return;
+	RagdollSplitIslands( *S );
+
+	b3Vec3 DeltaV = { Impulse.X * RAGDOLL_U2M, Impulse.Y * RAGDOLL_U2M, Impulse.Z * RAGDOLL_U2M };
+	const FLOAT Spd = sqrt( DeltaV.x*DeltaV.x + DeltaV.y*DeltaV.y + DeltaV.z*DeltaV.z );
+	const FLOAT MaxSpd = 12.0f;
+	if( Spd > MaxSpd )
+	{
+		DeltaV.x *= MaxSpd / Spd;
+		DeltaV.y *= MaxSpd / Spd;
+		DeltaV.z *= MaxSpd / Spd;
+	}
+	KickIsland( *S, Body, DeltaV, 6.0f );
+	// The stump recoils a little the other way.
+	b3Vec3 Recoil = { -DeltaV.x * 0.15f, -DeltaV.y * 0.15f, 0.3f };
+	KickIsland( *S, RagdollIslandRoot( *S, GRagdollBoneParent[Body] ), Recoil, 1.5f );
+
+	debugf( TEXT("RagdollPkg: dismember %s body=%i dv=%.1f m/s"), GetName(), Body, Min( Spd, MaxSpd ) );
+	*(DWORD*)Result = 1;
+	unguard;
+}
+
+// RemovePart(Body): cut the subtree off AND delete it (faces + bodies). Used
+// for decapitation, where the stock UTHeads chunk is the visible head.
+void ARagdollCarcass::execRemovePart( FFrame& Stack, RESULT_DECL )
+{
+	guard(ARagdollCarcass::execRemovePart);
+	P_GET_INT( Body );
+	P_FINISH;
+	*(DWORD*)Result = 0;
+
+	FRagdollState* S = GetRagdollStates().Find( this );
+	if( !S || !S->bBuilt || Body <= 0 || Body >= S->NumBodies || !S->Alive[Body] )
+		return;
+	DetachBody( *S, Body );
+	RagdollSplitIslands( *S );
+	RagdollRemoveIsland( *S, Body );
+	debugf( TEXT("RagdollPkg: removed part %s body=%i"), GetName(), Body );
+	*(DWORD*)Result = 1;
+	unguard;
+}
+
+// Gib(Damage, HitLocation): every joint goes, every body is blown radially
+// away from the hit point (speed grows with Damage) and the skin is split
+// into one closed island per body.
+void ARagdollCarcass::execGib( FFrame& Stack, RESULT_DECL )
+{
+	guard(ARagdollCarcass::execGib);
+	P_GET_INT( Damage );
+	P_GET_VECTOR( HitLocation );
+	P_FINISH;
+
+	FRagdollState* S = GetRagdollStates().Find( this );
+	if( !S || !S->bBuilt )
+		return;
+
+	INT NumCut = 0;
+	for( INT b=1; b<S->NumBodies; b++ )
+		if( DetachBody( *S, b ) )
+			NumCut++;
+	RagdollSplitIslands( *S );
+
+	// Hit point: the given location when it lies near the corpse, else the
+	// pelvis (gibbing kills pass the carcass location).
+	b3Vec3 Hit = { HitLocation.X * RAGDOLL_U2M, HitLocation.Y * RAGDOLL_U2M, HitLocation.Z * RAGDOLL_U2M };
+	{
+		b3WorldTransform T0 = b3Body_GetTransform( S->Bodies[BONE_Pelvis] );
+		FLOAT dx = Hit.x - T0.p.x, dy = Hit.y - T0.p.y, dz = Hit.z - T0.p.z;
+		if( HitLocation.IsZero() || dx*dx + dy*dy + dz*dz > 4.0f )
+			Hit = T0.p;
+	}
+
+	const FLOAT Base = 4.0f + Min( Max( Damage, 0 ), 250 ) * 0.03f;   // 4..11.5 m/s
+	for( INT b=0; b<S->NumBodies; b++ )
+	{
+		if( !S->Alive[b] )
+			continue;
+		b3WorldTransform T = b3Body_GetTransform( S->Bodies[b] );
+		b3Vec3 Dir = { T.p.x - Hit.x, T.p.y - Hit.y, T.p.z - Hit.z };
+		FLOAT L = sqrt( Dir.x*Dir.x + Dir.y*Dir.y + Dir.z*Dir.z );
+		if( L < 0.05f )
+		{
+			const FLOAT A = appFrand() * 2.0f * PI;
+			Dir.x = appCos( A ); Dir.y = appSin( A ); Dir.z = 0.3f;
+			L = sqrt( Dir.x*Dir.x + Dir.y*Dir.y + Dir.z*Dir.z );
+		}
+		Dir.x /= L; Dir.y /= L; Dir.z /= L;
+		Dir.z += 0.45f;   // bias upward so parts arc instead of skidding
+		const FLOAT Spd = Base * ( 0.7f + appFrand() * 0.6f );
+		b3Vec3 DeltaV = { Dir.x * Spd, Dir.y * Spd, Dir.z * Spd };
+		b3Vec3 V = b3Body_GetLinearVelocity( S->Bodies[b] );
+		V.x += DeltaV.x; V.y += DeltaV.y; V.z += DeltaV.z;
+		b3Body_SetLinearVelocity( S->Bodies[b], V );
+		b3Vec3 W;
+		W.x = ( appFrand() * 2.0f - 1.0f ) * 9.0f;
+		W.y = ( appFrand() * 2.0f - 1.0f ) * 9.0f;
+		W.z = ( appFrand() * 2.0f - 1.0f ) * 9.0f;
+		b3Body_SetAngularVelocity( S->Bodies[b], W );
+	}
+	debugf( TEXT("RagdollPkg: gib %s dmg=%i cut=%i base=%.1f m/s"), GetName(), Damage, NumCut, Base );
+	unguard;
+}
+
+// GetBodyLocation(Body): world position (UU) of a body's centre; the actor
+// location when the body does not exist.
+void ARagdollCarcass::execGetBodyLocation( FFrame& Stack, RESULT_DECL )
+{
+	guard(ARagdollCarcass::execGetBodyLocation);
+	P_GET_INT( Body );
+	P_FINISH;
+	FRagdollState* S = GetRagdollStates().Find( this );
+	if( !S || !S->bBuilt || Body < 0 || Body >= S->NumBodies || !S->Alive[Body] )
+	{
+		*(FVector*)Result = Location;
+		return;
+	}
+	b3WorldTransform T = b3Body_GetTransform( S->Bodies[Body] );
+	*(FVector*)Result = FVector( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
+	unguard;
+}
+
+// NearestBody(Loc): index of the live body closest to a world point, -1 none.
+void ARagdollCarcass::execNearestBody( FFrame& Stack, RESULT_DECL )
+{
+	guard(ARagdollCarcass::execNearestBody);
+	P_GET_VECTOR( Loc );
+	P_FINISH;
+	*(INT*)Result = NearestBodyImpl( GetRagdollStates().Find( this ), Loc );
+	unguard;
+}
+
+// BodyAttached(Body): true while the body exists and is still joined (through
+// uncut joints) to the pelvis.
+void ARagdollCarcass::execBodyAttached( FFrame& Stack, RESULT_DECL )
+{
+	guard(ARagdollCarcass::execBodyAttached);
+	P_GET_INT( Body );
+	P_FINISH;
+	FRagdollState* S = GetRagdollStates().Find( this );
+	*(DWORD*)Result = ( S && S->bBuilt && Body >= 0 && Body < S->NumBodies && S->Alive[Body]
+		&& RagdollIslandRoot( *S, Body ) == BONE_Pelvis ) ? 1 : 0;
 	unguard;
 }
 

@@ -90,7 +90,50 @@ struct FRagdollState
 
 	// Per-vertex smooth skin data (indexed by mesh vertex); empty in box mode.
 	TArray<FRagdollVertexBind> VertBinds;
+
+	// Gore state. Joints[child] is the Box3D joint attaching body 'child' to
+	// its parent (GRagdollBoneParent); Cut[child] once that joint is destroyed
+	// (dismemberment/gib), Alive[body] false once the body itself is removed
+	// (decapitation hands the head to the stock UTHeads chunk). BindPos holds
+	// the bind-space position (UU, DrawScale=1) of every mesh vertex, grown as
+	// seam vertices are duplicated; CapMaterial indexes the dark wound material
+	// used by the stump caps (-1 = none, caps use material 0).
+	b3JointId Joints[RAGDOLL_BONE_COUNT];
+	UBOOL     Alive[RAGDOLL_BONE_COUNT];
+	UBOOL     Cut[RAGDOLL_BONE_COUNT];
+	const struct FRagdollDatasetEntry* Dataset;
+	TArray<FVector> BindPos;
+	INT       CapMaterial;
+	INT       NumSplits;      // how many times the mesh has been re-split (diagnostics)
+
+	FRagdollState()
+	: bBuilt( 0 ), bFrameLogged( 0 ), bFrameRangeLogged( 0 ), bOutOfWorldLogged( 0 )
+	, SyncCount( 0 ), NumBodies( 0 ), World( b3_nullWorldId ), Mesh( NULL ), BoneDefs( NULL )
+	, SpawnYaw( 0 ), SpawnPitch( 0 ), bHasDeathPose( 0 )
+	, Dataset( NULL ), CapMaterial( -1 ), NumSplits( 0 )
+	{
+		for( INT i=0; i<RAGDOLL_BONE_COUNT; i++ )
+		{
+			Bodies[i]        = b3_nullBodyId;
+			RestPositions[i] = b3Vec3_zero;
+			RestRotations[i] = b3Quat_identity;
+			Joints[i]        = b3_nullJointId;
+			Alive[i]         = 0;
+			Cut[i]           = 0;
+		}
+	}
 };
+
+// Parent body of each bone (-1 for the pelvis root); the joint of body i
+// attaches i to GRagdollBoneParent[i].
+extern const INT GRagdollBoneParent[RAGDOLL_BONE_COUNT];
+
+// Root body of the rigid island 'Body' belongs to: walk up the parent chain
+// until a cut joint (or the pelvis). Bodies in the same island move together.
+INT RagdollIslandRoot( const FRagdollState& S, INT Body );
+
+// True when 'Body' is 'Ancestor' or hangs below it in the bone tree.
+UBOOL RagdollInSubtree( INT Body, INT Ancestor );
 
 // Shared level geometry world: ONE Box3D world per level that holds the level
 // BSP baked into a static triangle mesh plus every ragdoll's bodies/joints.
@@ -167,6 +210,25 @@ FLOAT RagdollFloatProp( UObject* Obj, const TCHAR* Name, FLOAT Default );
 // "set RagdollPkg.RagdollCarcass bBoxMannequins 1" or via UnrealTournament.ini
 // ([RagdollPkg.RagdollCarcass]); affects corpses spawned afterwards.
 UBOOL RagdollForceBoxes( UObject* Obj );
+
+// Rebuild the vertex->triangle adjacency (Connects/VertLinks) from the mesh's
+// Faces/Wedges. Must be re-run after any face/vertex rewrite.
+void RagdollBuildMeshAdjacency( URagdollMesh* Mesh );
+
+// Gore mesh surgery (RagdollGore.cpp). RagdollSplitIslands re-partitions the
+// skinned mesh along the current Cut[] joints: every vertex is re-bound to its
+// own island only, faces straddling two islands are duplicated per side with
+// the foreign vertices copied and bound to the near side, and each resulting
+// rim is fan-capped from the cut centroid with the wound material. Safe to
+// call repeatedly (later cuts only touch faces straddling the new cut).
+// RagdollRemoveIsland deletes every face of the island rooted at 'Root' and
+// destroys its bodies (used for decapitation: the stock head chunk is the
+// visible head). Both are no-ops for box-mannequin corpses.
+void RagdollSplitIslands( FRagdollState& S );
+void RagdollRemoveIsland( FRagdollState& S, INT Root );
+
+// The dark-red wound texture used for stump caps (created once, rooted).
+UTexture* RagdollCapTexture();
 
 // Real-mesh factory (UnRagdollMesh.cpp). Builds a URagdollMesh from the
 // precomputed dataset for the owning carcass's player mesh (ULodMesh), filling

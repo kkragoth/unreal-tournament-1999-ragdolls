@@ -33,6 +33,12 @@ public:
     DECLARE_FUNCTION(execApplyDamageImpulse);
     DECLARE_FUNCTION(execWalkOverPush);
     DECLARE_FUNCTION(execSetDeathPose);
+    DECLARE_FUNCTION(execDismember);
+    DECLARE_FUNCTION(execRemovePart);
+    DECLARE_FUNCTION(execGib);
+    DECLARE_FUNCTION(execGetBodyLocation);
+    DECLARE_FUNCTION(execNearestBody);
+    DECLARE_FUNCTION(execBodyAttached);
     DECLARE_CLASS(ARagdollCarcass,ACarcass,0,RagdollPkg)
     NO_DEFAULT_CONSTRUCTOR(ARagdollCarcass)
 };
@@ -46,6 +52,12 @@ AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execBuildRagdoll);
 AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execApplyDamageImpulse);
 AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execWalkOverPush);
 AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execSetDeathPose);
+AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execDismember);
+AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execRemovePart);
+AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execGib);
+AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execGetBodyLocation);
+AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execNearestBody);
+AUTOGENERATE_FUNCTION(ARagdollCarcass,-1,execBodyAttached);
 
 #ifndef NAMES_ONLY
 #undef AUTOGENERATE_NAME

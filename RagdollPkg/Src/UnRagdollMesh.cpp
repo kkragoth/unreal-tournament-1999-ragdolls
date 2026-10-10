@@ -21,33 +21,8 @@
 
 static const INT VertsPerBox = 8;
 
-// Build the vertex->triangle adjacency (Connects/VertLinks) from the mesh's own
-// Faces/Wedges. URender::DrawLodMesh's per-vertex lighting-normal pass reads
-// Connects(iVertex)/VertLinks(...) directly for every drawn vertex; empty
-// arrays are out-of-bounds reads that crash the renderer.
-static void BuildMeshAdjacency( URagdollMesh* Mesh )
-{
-	Mesh->Connects.Empty();
-	Mesh->VertLinks.Empty();
-	Mesh->Connects.Add( Mesh->FrameVerts );
-	for( INT v=0; v<Mesh->FrameVerts; v++ )
-	{
-		FMeshVertConnect& C = Mesh->Connects( v );
-		C.NumVertTriangles   = 0;
-		C.TriangleListOffset = Mesh->VertLinks.Num();
-		for( INT f=0; f<Mesh->Faces.Num(); f++ )
-		{
-			const FMeshFace& Face = Mesh->Faces( f );
-			for( INT j=0; j<3; j++ )
-				if( Mesh->Wedges( Face.iWedge[j] ).iVertex == v )
-				{
-					Mesh->VertLinks.Add( f );
-					C.NumVertTriangles++;
-					break;
-				}
-		}
-	}
-}
+// Vertex->triangle adjacency lives in RagdollGore.cpp (RagdollBuildMeshAdjacency)
+// so the gore surgery can rebuild it after rewriting faces.
 
 // Corner offsets of a box centered at the origin, half extents scaled by DrawScale.
 static FVector BoxCorner( const FRagdollBoneDef& D, INT Corner, FLOAT DrawScale )
@@ -171,7 +146,7 @@ URagdollMesh* CreateRagdollMesh( ARagdollCarcass* Carcass )
 		Mesh->CollapsePointThus( v ) = (_WORD)v;
 	// Per-vertex lighting adjacency; the renderer reads Connects/VertLinks for
 	// every drawn vertex (see comment above BuildMeshAdjacency).
-	BuildMeshAdjacency( Mesh );
+	RagdollBuildMeshAdjacency( Mesh );
 	debugf( TEXT("RagdollMesh: CreateRagdollMesh(numBoxVerts=%i)"), Mesh->FrameVerts );
 	return Mesh;
 	unguard;
@@ -215,6 +190,13 @@ URagdollMesh* CreatePlayerRagdollMesh( ARagdollCarcass* Carcass, FRagdollState& 
 		}
 	}
 
+	// Bind-space positions, kept per corpse so dismemberment can duplicate
+	// seam vertices and place stump caps (the packed Mesh->Verts are rounded).
+	S.BindPos.Empty( NumVerts );
+	for( INT k=0; k<NumVerts; k++ )
+		S.BindPos.AddItem( DS->Verts[k] );
+	S.Dataset = DS;
+
 	URagdollMesh* Mesh = ConstructObject<URagdollMesh>( URagdollMesh::StaticClass(), UObject::GetTransientPackage(), NAME_None, RF_Public );
 	if( !Mesh )
 		return NULL;
@@ -244,6 +226,16 @@ URagdollMesh* CreatePlayerRagdollMesh( ARagdollCarcass* Carcass, FRagdollState& 
 	Mesh->Materials.Add( DS->NumMats );
 	for( INT m=0; m<DS->NumMats; m++ )
 		Mesh->Materials( m ) = DS->Materials[m];
+	// Wound material for dismemberment caps: texture slot 7 (no UT model skin
+	// uses MultiSkins[7], so GetTexture falls through to Textures(7)).
+	S.CapMaterial = -1;
+	UTexture* CapTex = RagdollCapTexture();
+	if( CapTex )
+	{
+		S.CapMaterial = Mesh->Materials.Add();
+		Mesh->Materials( S.CapMaterial ).PolyFlags    = PF_TwoSided;
+		Mesh->Materials( S.CapMaterial ).TextureIndex = 7;
+	}
 
 	// Textures: the renderer resolves each face via UMesh::GetTexture(Count,
 	// Owner) with Count = Material.TextureIndex: Owner->MultiSkins[Count]
@@ -260,7 +252,7 @@ URagdollMesh* CreatePlayerRagdollMesh( ARagdollCarcass* Carcass, FRagdollState& 
 		if( !Skin )
 			Skin = Carcass->MultiSkins[0];
 		INT TexIndex = Mesh->Textures.Add();
-		Mesh->Textures( TexIndex ) = Skin;
+		Mesh->Textures( TexIndex ) = ( m == 7 && CapTex ) ? CapTex : Skin;
 	}
 
 	// LOD scaffolding (see CreateRagdollMesh for why this must exist).
@@ -279,7 +271,7 @@ URagdollMesh* CreatePlayerRagdollMesh( ARagdollCarcass* Carcass, FRagdollState& 
 	Mesh->CollapsePointThus.Add( Mesh->FrameVerts );
 	for( INT v=0; v<Mesh->FrameVerts; v++ )
 		Mesh->CollapsePointThus( v ) = (_WORD)v;
-	BuildMeshAdjacency( Mesh );
+	RagdollBuildMeshAdjacency( Mesh );
 
 	debugf( TEXT("RagdollMesh: CreatePlayerRagdollMesh mesh=%s dataset=%s verts=%i faces=%i wedges=%i mats=%i"),
 		Src->GetName(), DS->DatasetName, NumVerts, DS->NumFaces, DS->NumWedges, DS->NumMats );
@@ -585,6 +577,8 @@ FBox URagdollMesh::GetRenderBoundingBox( const AActor* Owner, UBOOL Exact )
 	{
 		for( INT i=0; i<S->NumBodies; i++ )
 		{
+			if( !S->Alive[i] )
+				continue;
 			b3WorldTransform T = b3Body_GetTransform( S->Bodies[i] );
 			FVector C( T.p.x * RAGDOLL_M2U, T.p.y * RAGDOLL_M2U, T.p.z * RAGDOLL_M2U );
 			FLOAT R = 30.0f * DrawScale;
