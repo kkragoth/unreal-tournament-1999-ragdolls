@@ -112,6 +112,28 @@ corpses read as stiff. The hip anchor is now the upper-thigh slab centroid
 Joint friction/limits/damping were retuned at the same time; see the
 "Physics tuning knobs" section in AGENTS.md for the console knobs.
 
+## Third pass (2026-10-10): joint-to-joint boxes + subdivision
+
+Playtest after the second pass: arms would not rise, legs folded up to the
+shoulders, skin artifacts. Measured cause: body boxes were cluster centroids,
+so the upper-arm box stuck 4-8 UU above the shoulder joint and the thigh box
+up to 8 UU above the hip joint on every model (the deltoid cap / buttock
+verts). Each limb pivoted around a point inside itself: the part above the
+pivot swung into the head/spine and the skin bound to it tore. The spine box
+was also clipped 18-20 UU short of the neck joint.
+
+`build_rig_mixamo.py` now builds every box from its two joints (pelvis =
+hips..pelvis-spine joint, spine = up to the neck joint, upper arm =
+shoulder..elbow, forearm = elbow..lowest hand vert, thigh = hip..knee, shin =
+knee..floor, head = neck-head joint..crown capped at 12 UU); widths still come
+from the clusters, capped. Hip cone back to ~70 deg, knee 115 deg, DeathSpin
+default 2.0.
+
+`tpose_rig.py --subdivide 1` (now the default) applies one level of
+shape-preserving 1:4 midpoint subdivision before rigging (~1200-1360 verts,
+2300-2700 faces per model; header ~78k lines) so bends have verts to blend
+over. `--subdivide 0` restores the source mesh.
+
 ## Knobs / known limits
 
 - Arm/trunk seam: shoulder pads of Male1 end up on the upper-arm bones (they

@@ -142,7 +142,7 @@ defaultproperties
 	JointFrictionScale=1.0
 	JointLimitScale=1.0
 	AngularDamping=0.15
-	DeathSpin=3.0
+	DeathSpin=2.0
 	bAlwaysTick=true
 	RemoteRole=ROLE_SimulatedProxy
 	DrawType=DT_Mesh

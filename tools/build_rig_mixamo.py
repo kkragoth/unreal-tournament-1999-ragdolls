@@ -185,54 +185,87 @@ def build_rig_mixamo(data, live_name="Commando", sel_name="SelectionMale1"):
         if centers[i]:
             centers[i] = (0.0, centers[i][1], centers[i][2])
 
-    # Half extents from cluster extents, capped (physics boxes are slimmer
-    # than the visual surface so non-adjacent bodies don't interpenetrate).
-    # (cap_x, cap_y, cap_z): the physics boxes are slimmer AND shorter than
-    # the visual cluster so non-adjacent bodies never spawn interpenetrating
-    # (an uncapped spine reached into the thigh tops, an uncapped head box
-    # swallowed a hair spike and stood 27 UU tall - both jam the ragdoll).
-    caps = {0: (9.0, 6.0, 5.0), 1: (7.0, 5.0, 9.0), 2: (2.6, 2.6, 2.5),
-            3: (4.2, 4.2, 6.0),
-            4: (2.2, 2.2, 9.0), 5: (2.2, 2.2, 9.0), 6: (1.8, 1.8, 9.0),
-            7: (1.8, 1.8, 9.0), 8: (3.2, 3.2, 11.0), 9: (3.2, 3.2, 11.0),
-            10: (2.6, 2.6, 12.0), 11: (2.6, 2.6, 12.0)}
-    mins = {0: (5.0, 4.0, 3.0), 1: (4.0, 3.0, 5.0), 3: (3.0, 3.0, 3.5)}
-    halves = []
-    for b in range(14):
+    # --- Joint anchors (skeleton joint heads), mirror-averaged L/R ---------
+    def joint_pos(name):
+        b = next((x for x in bones if x["name"] == name), None)
+        return tuple(b["head"]) if b else (0.0, 0.0, 0.0)
+
+    anch = [joint_pos(name) for name, _ in JOINT_BONES]
+    for l, r in ((3, 4), (5, 6), (7, 8), (9, 10), (11, 12)):
+        ax = (abs(anch[l][0]) + abs(anch[r][0])) / 2.0
+        ay = (anch[l][1] + anch[r][1]) / 2.0
+        az = (anch[l][2] + anch[r][2]) / 2.0
+        anch[l], anch[r] = (-ax, ay, az), (ax, ay, az)
+    for i in (0, 1, 2):
+        anch[i] = (0.0, anch[i][1], anch[i][2])
+
+    # --- Physics boxes JOINT-TO-JOINT -------------------------------------
+    # A body box must run from its proximal joint to its distal joint. Boxes
+    # centred on the vertex clusters stuck 4-8 UU past the shoulder/hip
+    # joints (deltoid cap, buttock), so each limb pivoted around a point
+    # inside itself: the part above the pivot swung the opposite way into
+    # the head/spine (arms could not rise, thighs folded up) and the skin
+    # bound to it tore. Widths come from the cluster, capped so non-adjacent
+    # bodies clear each other; heights come from the joints.
+    WID = {0: (9.0, 6.0), 1: (7.0, 5.0), 2: (2.6, 2.6), 3: (4.2, 4.2),
+           4: (2.2, 2.2), 5: (2.2, 2.2), 6: (1.8, 1.8), 7: (1.8, 1.8),
+           8: (3.2, 3.2), 9: (3.2, 3.2), 10: (2.6, 2.6), 11: (2.6, 2.6)}
+    halves = [(2.0, 2.0, 2.5)] * 14
+
+    def width(b, c):
+        cx, cy = WID[b]
+        hmin = 2.0 if b >= 4 else (5.0 if b == 0 else 3.0)
         cl = clusters[b]
-        c = centers[b]
-        if not cl or c is None or b >= 12:
-            halves.append((2.0, 2.0, 2.5))
-            continue
-        hx = max(abs(verts[i][0] - c[0]) for i in cl)
-        hy = max(abs(verts[i][1] - c[1]) for i in cl)
-        hz = max(abs(verts[i][2] - c[2]) for i in cl)
-        cx, cy, cz = caps.get(b, (2.0, 2.0, 8.0))
-        hmin = 1.0 if b < 4 else 2.0
-        mx_, my_, mz_ = mins.get(b, (hmin, hmin, hmin))
-        halves.append((max(min(hx, cx), mx_), max(min(hy, cy), my_),
-                       max(min(hz, cz), mz_)))
-    # Mirror-average L/R half extents (centers already are) so both limbs
-    # weigh and swing the same.
-    for b in (4, 6, 8, 10):
-        hl, hr = halves[b], halves[b + 1]
-        avg = tuple((hl[k] + hr[k]) / 2.0 for k in range(3))
-        halves[b] = halves[b + 1] = avg
-    # Trunk stack ordering: Spine must stop where Head begins.
-    top_spine = centers[1][2] + halves[1][2]
-    bot_head = centers[3][2] - halves[3][2]
-    if top_spine > bot_head:
-        mid = (top_spine + bot_head) / 2.0
-        halves[1] = (halves[1][0], halves[1][1], max(1.0, mid - centers[1][2]))
-        halves[3] = (halves[3][0], halves[3][1], max(1.0, centers[3][2] - mid))
-    # Shins span thigh-bottom -> foot-bottom so the feet ride them.
+        if cl:
+            hx = max(abs(verts[i][0] - c[0]) for i in cl)
+            hy = max(abs(verts[i][1] - c[1]) for i in cl)
+        else:
+            hx, hy = cx, cy
+        return max(min(hx, cx), hmin), max(min(hy, cy), hmin)
+
+    def span(b, top, bot, xy, pad=0.0):
+        cz = (top + bot) / 2.0
+        hz = max(1.5, (top - bot) / 2.0 + pad)
+        c = (xy[0], xy[1], cz)
+        hx, hy = width(b, c)
+        centers[b] = c
+        halves[b] = (hx, hy, hz)
+
+    def cxy(b, fb):
+        cl = clusters[b]
+        if not cl:
+            return fb
+        return (st.mean(verts[i][0] for i in cl), st.mean(verts[i][1] for i in cl))
+
     mnz = min(v[2] for v in verts)
-    for b, thigh in [(10, 8), (11, 9)]:
-        knee_top = centers[thigh][2] - halves[thigh][2]
-        new_cz = (knee_top + mnz) / 2.0
-        new_hz = (knee_top - mnz) / 2.0 + 1.0
-        centers[b] = (centers[b][0], centers[b][1], new_cz)
-        halves[b] = (halves[b][0], halves[b][1], new_hz)
+    crown = max(verts[i][2] for i in clusters[3]) if clusters[3] else anch[2][2] + 10.0
+    hip_z = (anch[7][2] + anch[8][2]) / 2.0
+    # trunk: pelvis = hips..pelvis-spine joint, spine = up to the neck joint,
+    # neck = up to the head joint, head = up to the crown (capped)
+    span(0, anch[0][2] + 1.0, hip_z - 2.5, (0.0, cxy(0, anch[0][:2])[1]))
+    span(1, anch[1][2], anch[0][2], (0.0, (anch[0][1] + anch[1][1]) / 2.0))
+    span(2, anch[2][2], anch[1][2], (0.0, (anch[1][1] + anch[2][1]) / 2.0))
+    span(3, min(crown, anch[2][2] + 12.0), anch[2][2], (0.0, cxy(3, anch[2][:2])[1]))
+    # arms: upper arm = shoulder..elbow, forearm = elbow..lowest hand vert
+    for ua, fa, sh, el in ((4, 6, 3, 5), (5, 7, 4, 6)):
+        hand_bot = min(verts[i][2] for i in clusters[fa]) if clusters[fa] else anch[el][2] - 15.0
+        span(ua, anch[sh][2], anch[el][2],
+             ((anch[sh][0] + anch[el][0]) / 2.0, (anch[sh][1] + anch[el][1]) / 2.0))
+        span(fa, anch[el][2], hand_bot, cxy(fa, anch[el][:2]))
+    # legs: thigh = hip..knee, shin = knee..floor (feet ride the shins)
+    for th, sn, hp, kn in ((8, 10, 7, 9), (9, 11, 8, 10)):
+        span(th, anch[hp][2], anch[kn][2],
+             ((anch[hp][0] + anch[kn][0]) / 2.0, (anch[hp][1] + anch[kn][1]) / 2.0))
+        span(sn, anch[kn][2], mnz, cxy(sn, anch[kn][:2]), pad=1.0)
+    # mirror-average the limb boxes (cluster-derived xy/widths differ L/R)
+    for b in (4, 6, 8, 10):
+        cl_, cr_ = centers[b], centers[b + 1]
+        ax = (abs(cl_[0]) + abs(cr_[0])) / 2.0
+        ay = (cl_[1] + cr_[1]) / 2.0
+        az = (cl_[2] + cr_[2]) / 2.0
+        centers[b], centers[b + 1] = (-ax, ay, az), (ax, ay, az)
+        avg = tuple((halves[b][k] + halves[b + 1][k]) / 2.0 for k in range(3))
+        halves[b] = halves[b + 1] = avg
 
     # Non-adjacent bodies must not interpenetrate at spawn: resolve any
     # remaining overlap by moving the LONGER box's center away along the
@@ -277,19 +310,8 @@ def build_rig_mixamo(data, live_name="Commando", sel_name="SelectionMale1"):
     if left:
         print("  !! unresolved non-adjacent overlaps:", left)
 
-    # --- 3) Joint anchors from the skeleton -------------------------------
-    def joint_pos(name, side):
-        b = next((x for x in bones if x["name"] == name), None)
-        if b is None:
-            return None
-        return b["head"]
-
-    anchors = []
-    for name, side in JOINT_BONES:
-        p = joint_pos(name, side)
-        if p is None:
-            p = (0.0, 0.0, 0.0)
-        anchors.append(p)
+    # --- 3) Joint anchors: the mirrored skeleton joints used for the boxes --
+    anchors = list(anch)
 
     # --- 4) Translate so pelvis center sits at the origin ----------------
     px, py, pz = centers[0]

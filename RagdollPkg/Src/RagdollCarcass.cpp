@@ -327,7 +327,7 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 
 	// Ragdoll bodies.
 	const FLOAT AngDamp   = RagdollFloatProp( C, TEXT("AngularDamping"), 0.15f );
-	const FLOAT DeathSpin = RagdollFloatProp( C, TEXT("DeathSpin"), 3.0f );
+	const FLOAT DeathSpin = RagdollFloatProp( C, TEXT("DeathSpin"), 2.0f );
 	for( INT i=0; i<S.NumBodies; i++ )
 	{
 		const FRagdollBoneDef& D = Defs[i];
@@ -410,10 +410,10 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	AddJoint( S, BONE_Spine,     BONE_UpperArmR, Defs, Anch[4], DrawScale, { JK_Ball, 2.40f, -0.80f,  0.80f, 0.3f } );
 	AddJoint( S, BONE_UpperArmL, BONE_ForearmL,  Defs, Anch[5], DrawScale, { JK_Hinge, -0.05f, 2.40f, 0.0f, 0.15f } );
 	AddJoint( S, BONE_UpperArmR, BONE_ForearmR,  Defs, Anch[6], DrawScale, { JK_Hinge, -0.05f, 2.40f, 0.0f, 0.15f } );
-	AddJoint( S, BONE_Pelvis,    BONE_ThighL,    Defs, Anch[7], DrawScale, { JK_Ball, 1.70f, -0.60f,  0.60f, 0.4f } );
-	AddJoint( S, BONE_Pelvis,    BONE_ThighR,    Defs, Anch[8], DrawScale, { JK_Ball, 1.70f, -0.60f,  0.60f, 0.4f } );
-	AddJoint( S, BONE_ThighL,    BONE_ShinL,     Defs, Anch[9], DrawScale, { JK_Hinge, -2.30f, 0.05f, 0.0f, 0.2f } );
-	AddJoint( S, BONE_ThighR,    BONE_ShinR,     Defs, Anch[10], DrawScale, { JK_Hinge, -2.30f, 0.05f, 0.0f, 0.2f } );
+	AddJoint( S, BONE_Pelvis,    BONE_ThighL,    Defs, Anch[7], DrawScale, { JK_Ball, 1.20f, -0.50f,  0.50f, 0.5f } );
+	AddJoint( S, BONE_Pelvis,    BONE_ThighR,    Defs, Anch[8], DrawScale, { JK_Ball, 1.20f, -0.50f,  0.50f, 0.5f } );
+	AddJoint( S, BONE_ThighL,    BONE_ShinL,     Defs, Anch[9], DrawScale, { JK_Hinge, -2.00f, 0.05f, 0.0f, 0.25f } );
+	AddJoint( S, BONE_ThighR,    BONE_ShinR,     Defs, Anch[10], DrawScale, { JK_Hinge, -2.00f, 0.05f, 0.0f, 0.25f } );
 	// Feet are skipped from real-mesh ragdolls; only the box skeleton keeps the
 	// ankle joints (bodies 12/13 only exist in the box path).
 	if( !DS )

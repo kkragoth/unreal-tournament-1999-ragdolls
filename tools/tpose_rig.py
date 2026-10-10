@@ -71,6 +71,43 @@ def load_bind(pkg, sel_name, frame=0):
             "yaw": yaw, "mirror": mir}
 
 
+def subdivide(d):
+    """One level of 1:4 midpoint subdivision (shape-preserving: no smoothing,
+    the UT silhouette stays as authored). Edge midpoints are shared through
+    the dense vertex graph; each face gets its own three mid-wedges with the
+    averaged corner UVs, so UV seams survive. 4x faces, ~4x verts."""
+    V = list(d["verts"])
+    wedges = list(d["wedges"])
+    wfaces, fmat = d["wfaces"], d["fmat"]
+    edge_mid = {}
+    new_wfaces, new_fmat = [], []
+    for fi, (w0, w1, w2) in enumerate(wfaces):
+        ws = (w0, w1, w2)
+        mids = []
+        for k in range(3):
+            a, b = ws[k], ws[(k + 1) % 3]
+            va, vb = wedges[a][0], wedges[b][0]
+            key = (min(va, vb), max(va, vb))
+            if key not in edge_mid:
+                edge_mid[key] = len(V)
+                V.append(tuple((V[va][j] + V[vb][j]) / 2.0 for j in range(3)))
+            u = int(round((wedges[a][1] + wedges[b][1]) / 2.0))
+            v = int(round((wedges[a][2] + wedges[b][2]) / 2.0))
+            wedges.append((edge_mid[key], u, v))
+            mids.append(len(wedges) - 1)
+        m0, m1, m2 = mids
+        for tri in ((w0, m0, m2), (m0, w1, m1), (m2, m1, w2), (m0, m1, m2)):
+            new_wfaces.append(tri)
+            new_fmat.append(fmat[fi])
+    out = dict(d)
+    out["verts"] = V
+    out["wedges"] = wedges
+    out["wfaces"] = new_wfaces
+    out["fmat"] = new_fmat
+    out["faces"] = [tuple(wedges[w][0] for w in fa) for fa in new_wfaces]
+    return out
+
+
 # ----------------------------------------------------------------------------
 # 2) graph helpers
 # ----------------------------------------------------------------------------
@@ -607,6 +644,8 @@ def dominant_groups(weights, verts):
 # ----------------------------------------------------------------------------
 def process(pkg, sel, args, blender):
     d = load_bind(pkg, sel)
+    for _ in range(max(0, args.subdivide)):
+        d = subdivide(d)
     V, F = d["verts"], d["faces"]
     side, info = segment_arms(V, F)
     print(f"\n== {sel}: {len(V)}v {len(F)}f yaw={d['yaw']:+d} H={info['H']:.1f} "
@@ -684,6 +723,7 @@ def process(pkg, sel, args, blender):
            "weights": weights,
            "materials": [list(mm) for mm in d["mesh"].materials],
            "source": {"tool": "tools/tpose_rig.py", "sel": sel, "yaw": d["yaw"],
+                      "subdivide": args.subdivide,
                       "tpose": {str(s): {"pivot": a["pivot"], "axis": a["axis"],
                                          "angle": a["angle"]} for s, a in arms.items()}}}
     os.makedirs(args.out_dir, exist_ok=True)
@@ -709,6 +749,9 @@ def main(argv):
     ap.add_argument("--scratch", default="tools/rig_verify")
     ap.add_argument("--blender", default=None)
     ap.add_argument("--save-blend", action="store_true")
+    ap.add_argument("--subdivide", type=int, default=1,
+                    help="levels of 1:4 midpoint subdivision before rigging "
+                         "(default 1: ~4x verts so bends have verts to blend over; 0 = source mesh)")
     ap.add_argument("--stats-only", action="store_true")
     args = ap.parse_args(argv)
     blender = args.blender or os.environ.get("BLENDER_EXE") or shutil.which("blender") \
