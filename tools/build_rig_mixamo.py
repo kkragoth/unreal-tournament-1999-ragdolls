@@ -42,8 +42,11 @@ MIXAMO_MAP = {
     "mixamorig:Spine": 1, "mixamorig:Spine1": 1, "mixamorig:Spine2": 1,
     "mixamorig:Neck": 2,
     "mixamorig:Head": 3, "mixamorig:HeadTop_End": 3,
-    "mixamorig:LeftShoulder": 4, "mixamorig:LeftArm": 4,
-    "mixamorig:RightShoulder": 5, "mixamorig:RightArm": 5,
+    # Clavicles ride the SPINE body: their heat weights cover the upper chest
+    # and shoulder top, which must not move with the upper arm (that made the
+    # chest bulge/"change size" when an arm swung).
+    "mixamorig:LeftShoulder": 1, "mixamorig:LeftArm": 4,
+    "mixamorig:RightShoulder": 1, "mixamorig:RightArm": 5,
     "mixamorig:LeftForeArm": 6, "mixamorig:LeftHand": 6,
     "mixamorig:LeftHandThumb1": 6, "mixamorig:LeftHandThumb2": 6,
     "mixamorig:LeftHandThumb3": 6, "mixamorig:LeftHandThumb4": 6,
@@ -207,9 +210,12 @@ def build_rig_mixamo(data, live_name="Commando", sel_name="SelectionMale1"):
     # the head/spine (arms could not rise, thighs folded up) and the skin
     # bound to it tore. Widths come from the cluster, capped so non-adjacent
     # bodies clear each other; heights come from the joints.
-    WID = {0: (9.0, 6.0), 1: (7.0, 5.0), 2: (2.6, 2.6), 3: (4.2, 4.2),
-           4: (2.2, 2.2), 5: (2.2, 2.2), 6: (1.8, 1.8), 7: (1.8, 1.8),
-           8: (3.2, 3.2), 9: (3.2, 3.2), 10: (2.6, 2.6), 11: (2.6, 2.6)}
+    # Caps close to the real limb thickness (arms ~3 UU, thighs ~4.5) so the
+    # visible skin cannot pass through the torso long before the boxes
+    # touch; the overlap resolver below trims whatever still collides at spawn.
+    WID = {0: (9.0, 6.5), 1: (8.0, 6.0), 2: (2.8, 2.8), 3: (4.6, 4.6),
+           4: (3.0, 3.0), 5: (3.0, 3.0), 6: (2.6, 2.6), 7: (2.6, 2.6),
+           8: (4.2, 4.2), 9: (4.2, 4.2), 10: (3.4, 3.4), 11: (3.4, 3.4)}
     halves = [(2.0, 2.0, 2.5)] * 14
 
     def width(b, c):

@@ -700,11 +700,47 @@ def process(pkg, sel, args, blender):
         tot = sum(v for _, v in top) or 1.0
         weights[i] = {k: v / tot for k, v in top}
 
+    # Segmentation-guided clamp: heat happily gives chest verts partial
+    # Arm weight (and arm verts partial Spine weight) through the open
+    # armpit. Only verts within ~2.5 UU (surface distance) of the shoulder seam
+    # may blend across; farther trunk verts are pure trunk, farther arm verts
+    # pure arm. Clavicle (Shoulder) bones count as trunk.
+    for s_, a in arms.items():
+        L = "Left" if s_ == -1 else "Right"
+        armnames = {f"mixamorig:{L}{n}" for n in ARM_CHAIN}
+        dist = None
+        if a["seam"]:
+            dist, _ = multi_dijkstra({i: 0 for i in a["seam"]}, info["adj"], T)
+        for i, w in enumerate(weights):
+            if not w:
+                continue
+            dd = dist[i] if dist is not None else math.inf
+            f = 0.0 if dd == math.inf else max(0.0, 1.0 - dd / 2.5)
+            f = f * f * (3 - 2 * f)
+            if side[i] == 0:
+                f = min(f, 0.5)        # trunk verts stay at least half trunk
+                grp = {k: v for k, v in w.items() if k in armnames}
+            elif side[i] == s_:
+                grp = {k: v for k, v in w.items() if k not in armnames}
+            else:
+                continue
+            tot = sum(grp.values())
+            if tot <= f or tot <= 0.0:
+                continue
+            scale_ = f / tot
+            for k in grp:
+                w[k] *= scale_
+            w = {k: v for k, v in w.items() if v > 1e-4}
+            if not w:
+                w = {("mixamorig:Spine" if side[i] == 0 else f"mixamorig:{L}Arm"): 1.0}
+            norm_ = sum(w.values())
+            weights[i] = {k: v / norm_ for k, v in w.items()}
+
     # Hand check: verts that were segmented as arm must not be weighted to
     # leg bones, and leg verts must not be weighted to arm bones.
     leak = 0
     for i, w in enumerate(weights):
-        armw = sum(v for k, v in w.items() if any(k.endswith(x) for x in ARM_CHAIN + ("Shoulder",)))
+        armw = sum(v for k, v in w.items() if any(k.endswith(x) for x in ARM_CHAIN))
         legw = sum(v for k, v in w.items() if any(x in k for x in ("UpLeg", "Leg", "Foot", "Toe")))
         if side[i] != 0 and legw > 0.25:
             leak += 1
@@ -720,7 +756,7 @@ def process(pkg, sel, args, blender):
                           "uvs": [[d["wedges"][wi][1] / 255.0, d["wedges"][wi][2] / 255.0] for wi in wf],
                           "mat": d["fmat"][fi]})
     rig = {"verts": [list(v) for v in V], "faces": faces_out, "bones": bones_down,
-           "weights": weights,
+           "weights": weights, "side": side,
            "materials": [list(mm) for mm in d["mesh"].materials],
            "source": {"tool": "tools/tpose_rig.py", "sel": sel, "yaw": d["yaw"],
                       "subdivide": args.subdivide,

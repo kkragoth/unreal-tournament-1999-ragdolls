@@ -246,15 +246,19 @@ URagdollMesh* CreatePlayerRagdollMesh( ARagdollCarcass* Carcass, FRagdollState& 
 		Mesh->Materials( m ) = DS->Materials[m];
 
 	// Textures: the renderer resolves each face via UMesh::GetTexture(Count,
-	// Owner) = Owner->MultiSkins[Count] (the Carcass copies the dead player's
-	// MultiSkins in Initfor), so this array is just the fallback for empty slots.
-	for( INT m=0; m<DS->NumMats; m++ )
+	// Owner) with Count = Material.TextureIndex: Owner->MultiSkins[Count]
+	// first (the Carcass copies the dead player's MultiSkins in Initfor), then
+	// Textures(Count). Fill ALL 8 slots (not NumMats): the dataset materials
+	// keep the Selection mesh's authored slots, which can have gaps (Female1
+	// uses 0,1,3), so Textures(3) must exist and hold a sensible fallback or
+	// that part of the body (the face) renders with no texture at all.
+	for( INT m=0; m<8; m++ )
 	{
-		UTexture* Skin = NULL;
-		if( Carcass->MultiSkins[m] )
-			Skin = Carcass->MultiSkins[m];
-		else if( Carcass->Skin )
+		UTexture* Skin = Carcass->MultiSkins[m];
+		if( !Skin )
 			Skin = Carcass->Skin;
+		if( !Skin )
+			Skin = Carcass->MultiSkins[0];
 		INT TexIndex = Mesh->Textures.Add();
 		Mesh->Textures( TexIndex ) = Skin;
 	}

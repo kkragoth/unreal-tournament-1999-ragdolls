@@ -134,6 +134,24 @@ shape-preserving 1:4 midpoint subdivision before rigging (~1200-1360 verts,
 2300-2700 faces per model; header ~78k lines) so bends have verts to blend
 over. `--subdivide 0` restores the source mesh.
 
+## Fourth pass (2026-10-10): textures, chest bleed, box widths
+
+- **Missing FCommando face**: its mesh uses texture slots 0, 1 and 3 (slot 2
+  unused, live pawn identical). `UnRagdollMesh.cpp` filled only `NumMats`
+  texture entries, so slot 3 had no entry; it now fills all 8 MultiSkins
+  slots with MultiSkins[i] / Skin / MultiSkins[0] fallbacks.
+- **Chest moving with the arm**: (a) clavicle bones now map to the Spine
+  body in `MIXAMO_MAP` (their heat weights cover the upper chest); (b)
+  `tpose_rig.py` clamps cross-seam weights with the arm segmentation: trunk
+  verts may carry arm weight only within 2.5 UU (surface distance) of the
+  armpit seam and never more than 50%, arm verts likewise for trunk weight.
+  Result: 0 trunk chest verts with >5% arm weight on four models, 9 verts
+  (max 19%) on FCommando.
+- **Limbs passing through the torso**: box width caps raised to the real
+  limb thickness (arm 3.0, forearm 2.6, thigh 4.2, shin 3.4, spine 8x6);
+  the overlap resolver trims spawn collisions.
+- Rig JSON now carries `side` (per-vertex arm segmentation) for diagnostics.
+
 ## Knobs / known limits
 
 - Arm/trunk seam: shoulder pads of Male1 end up on the upper-arm bones (they
