@@ -75,8 +75,8 @@ function Timer()
 				Log("RagdollTestMutator: RemovePart head -> " $ R.RemovePart(3) $ " nearest=" $ R.NearestBody(R.Location), 'RagdollTest');
 				break;
 			case 3:
-				R.ChunkUp(120);
-				Log("RagdollTestMutator: ChunkUp done gibbed=" $ R.bGibbed $ " lifespan=" $ R.LifeSpan, 'RagdollTest');
+				R.ChunkUp(40 + (Sweeps * 53) % 180);
+				Log("RagdollTestMutator: ChunkUp dmg=" $ (40 + (Sweeps * 53) % 180) $ " gibbed=" $ R.bGibbed $ " lifespan=" $ R.LifeSpan, 'RagdollTest');
 				break;
 		}
 	}

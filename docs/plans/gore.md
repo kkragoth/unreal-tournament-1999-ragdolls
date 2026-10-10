@@ -236,10 +236,19 @@ the first playtest.
   tear off the body nearest the hit (torso hits do nothing). Corpse hits:
   stock gib thresholds first, else per-part accumulation (head/neck 40,
   forearm/shin/foot 60, upper arm 70, thigh 90, `'shot'` at 40%).
-- **Gib**: `Gib()` cuts all joints and blasts radially (4..11.5 m/s with
-  damage), spawns `UT_BigBloodHit`, 2-3 `UT_BloodBurst`, one organ on high
-  detail, `LifeSpan=20`. Stock `UT_MaleTorso`/`UT_MaleArm`/`UT_Thigh` are not
-  spawned. With low gore the corpse is simply destroyed on ChunkUp.
+- **Gib is partial and damage-scaled**: `Gib()` cuts `round(Frac * 11 *
+  rand(0.6..1.4))` joints, `Frac = clamp((Damage-30)/170, 0.12, 1)`, at
+  least 2, plus a 35% chance of a total gib above 150 damage; the joints
+  nearest the hit (jittered distance) go first, so a glancing rocket tears
+  2-3 parts off and a point-blank overkill scatters everything (headless:
+  51 dmg -> 2/11, 83 -> 4, 115 -> 5, 199 -> 7). Detached islands are
+  blasted radially (4..11.5 m/s with damage), the trunk only at 35%.
+  `Gib` returns the joints still intact; only a fully scattered corpse sets
+  `bGibbed` / `LifeSpan=20`, otherwise `CumulativeDamage` and the part
+  damage reset so later hits keep gibbing the trunk. On top: `UT_BigBloodHit`,
+  2-3 `UT_BloodBurst`, one organ on high detail (once). Stock
+  `UT_MaleTorso`/`UT_MaleArm`/`UT_Thigh` are not spawned. With low gore the
+  corpse is simply destroyed on ChunkUp.
 - **Blood**: `UT_BloodHit` per corpse hit, bursts at the cut, bursts
   following a cut part for 2-3 s (`Bleed()` from the sim Timer, 0.15 s
   cadence, 60%), then a `UTBloodPool2` decal at the part's position with

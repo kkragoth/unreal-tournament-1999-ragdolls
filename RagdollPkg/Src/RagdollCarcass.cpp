@@ -1051,25 +1051,25 @@ void ARagdollCarcass::execRemovePart( FFrame& Stack, RESULT_DECL )
 	unguard;
 }
 
-// Gib(Damage, HitLocation): every joint goes, every body is blown radially
-// away from the hit point (speed grows with Damage) and the skin is split
-// into one closed island per body.
+// Gib(Damage, HitLocation): blow the corpse apart. How MANY joints go scales
+// with Damage (plus a random factor), and the joints nearest the hit point go
+// first, so a glancing rocket tears two or three parts off while a point-blank
+// overkill scatters all twelve bodies. Every island is blasted radially away
+// from the hit (the trunk, being heavy, only a little), speed growing with
+// Damage, and the skin is split into one closed island per rigid group.
+// Returns the number of joints still intact (0 = fully gibbed), so script can
+// let later hits keep gibbing a partially destroyed corpse.
 void ARagdollCarcass::execGib( FFrame& Stack, RESULT_DECL )
 {
 	guard(ARagdollCarcass::execGib);
 	P_GET_INT( Damage );
 	P_GET_VECTOR( HitLocation );
 	P_FINISH;
+	*(INT*)Result = 0;
 
 	FRagdollState* S = GetRagdollStates().Find( this );
 	if( !S || !S->bBuilt )
 		return;
-
-	INT NumCut = 0;
-	for( INT b=1; b<S->NumBodies; b++ )
-		if( DetachBody( *S, b ) )
-			NumCut++;
-	RagdollSplitIslands( *S );
 
 	// Hit point: the given location when it lies near the corpse, else the
 	// pelvis (gibbing kills pass the carcass location).
@@ -1081,11 +1081,54 @@ void ARagdollCarcass::execGib( FFrame& Stack, RESULT_DECL )
 			Hit = T0.p;
 	}
 
+	// Candidates: live bodies whose joint is still intact, ordered by their
+	// (jittered) distance to the hit so the blast eats the corpse from the
+	// impact outward rather than popping random far limbs.
+	INT   Cand[RAGDOLL_BONE_COUNT];
+	FLOAT Score[RAGDOLL_BONE_COUNT];
+	INT   NumCand = 0;
+	for( INT b=1; b<S->NumBodies; b++ )
+	{
+		if( !S->Alive[b] || S->Cut[b] )
+			continue;
+		b3WorldTransform T = b3Body_GetTransform( S->Bodies[b] );
+		FLOAT dx = T.p.x - Hit.x, dy = T.p.y - Hit.y, dz = T.p.z - Hit.z;
+		Cand[NumCand]  = b;
+		Score[NumCand] = sqrt( dx*dx + dy*dy + dz*dz ) * ( 0.6f + appFrand() * 0.8f );
+		NumCand++;
+	}
+	if( NumCand == 0 )
+		return;
+	for( INT i=1; i<NumCand; i++ )          // insertion sort, 11 entries
+		for( INT j=i; j>0 && Score[j] < Score[j-1]; j-- )
+		{
+			Exchange( Score[j], Score[j-1] );
+			Exchange( Cand[j],  Cand[j-1] );
+		}
+
+	// How much of the corpse goes: 40 damage (the stock gib floor) tears off a
+	// couple of parts, ~200 takes everything; random spread of 0.6..1.4 on top
+	// and a 35% chance of a total gib above 150.
+	const FLOAT Frac = ClampF( ( Damage - 30.0f ) / 170.0f, 0.12f, 1.0f );
+	INT Want = appRound( Frac * NumCand * ( 0.6f + appFrand() * 0.8f ) );
+	if( Damage >= 150 && appFrand() < 0.35f )
+		Want = NumCand;
+	Want = Clamp( Want, Min( 2, NumCand ), NumCand );
+
+	INT NumCut = 0;
+	for( INT i=0; i<Want; i++ )
+		if( DetachBody( *S, Cand[i] ) )
+			NumCut++;
+	RagdollSplitIslands( *S );
+
 	const FLOAT Base = 4.0f + Min( Max( Damage, 0 ), 250 ) * 0.03f;   // 4..11.5 m/s
 	for( INT b=0; b<S->NumBodies; b++ )
 	{
 		if( !S->Alive[b] )
 			continue;
+		// The trunk (whatever is still joined to the pelvis) is heavy and
+		// stays roughly put; detached islands fly.
+		const FLOAT Weight = ( RagdollIslandRoot( *S, b ) == BONE_Pelvis ) ? 0.35f : 1.0f;
 		b3WorldTransform T = b3Body_GetTransform( S->Bodies[b] );
 		b3Vec3 Dir = { T.p.x - Hit.x, T.p.y - Hit.y, T.p.z - Hit.z };
 		FLOAT L = sqrt( Dir.x*Dir.x + Dir.y*Dir.y + Dir.z*Dir.z );
@@ -1097,18 +1140,20 @@ void ARagdollCarcass::execGib( FFrame& Stack, RESULT_DECL )
 		}
 		Dir.x /= L; Dir.y /= L; Dir.z /= L;
 		Dir.z += 0.45f;   // bias upward so parts arc instead of skidding
-		const FLOAT Spd = Base * ( 0.7f + appFrand() * 0.6f );
+		const FLOAT Spd = Base * ( 0.7f + appFrand() * 0.6f ) * Weight;
 		b3Vec3 DeltaV = { Dir.x * Spd, Dir.y * Spd, Dir.z * Spd };
 		b3Vec3 V = b3Body_GetLinearVelocity( S->Bodies[b] );
 		V.x += DeltaV.x; V.y += DeltaV.y; V.z += DeltaV.z;
 		b3Body_SetLinearVelocity( S->Bodies[b], V );
 		b3Vec3 W;
-		W.x = ( appFrand() * 2.0f - 1.0f ) * 9.0f;
-		W.y = ( appFrand() * 2.0f - 1.0f ) * 9.0f;
-		W.z = ( appFrand() * 2.0f - 1.0f ) * 9.0f;
+		W.x = ( appFrand() * 2.0f - 1.0f ) * 9.0f * Weight;
+		W.y = ( appFrand() * 2.0f - 1.0f ) * 9.0f * Weight;
+		W.z = ( appFrand() * 2.0f - 1.0f ) * 9.0f * Weight;
 		b3Body_SetAngularVelocity( S->Bodies[b], W );
 	}
-	debugf( TEXT("RagdollPkg: gib %s dmg=%i cut=%i base=%.1f m/s"), GetName(), Damage, NumCut, Base );
+	const INT Remaining = NumCand - NumCut;
+	*(INT*)Result = Remaining;
+	debugf( TEXT("RagdollPkg: gib %s dmg=%i cut=%i/%i remaining=%i base=%.1f m/s"), GetName(), Damage, NumCut, NumCand, Remaining, Base );
 	unguard;
 }
 

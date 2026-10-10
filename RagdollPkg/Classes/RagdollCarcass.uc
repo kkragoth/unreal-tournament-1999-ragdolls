@@ -85,6 +85,7 @@ var bool   bFemale;
 var bool   bBoss;
 var vector LastHitLocation;    // killing blow (from RagdollMutator) or last corpse hit
 var vector LastHitMomentum;
+var bool   bOrganSpawned;
 
 // Stock Botpack classes, loaded by name so the package depends on Engine only.
 var class<Actor>   BloodBurstClass;   // UT_BloodBurst: sprite burst at a cut
@@ -112,7 +113,7 @@ native function SetDeathPose(int Yaw, int Pitch);
 // Gore natives (see RagdollCarcass.cpp / RagdollGore.cpp).
 native function bool   Dismember(int Body, vector Impulse);    // tear the subtree off; Impulse in UU/s
 native function bool   RemovePart(int Body);                   // tear off AND delete (decapitation)
-native function        Gib(int Damage, vector HitLocation);    // every joint, radial blast
+native function int    Gib(int Damage, vector HitLocation);    // partial/total blast; returns joints left
 native function vector GetBodyLocation(int Body);
 native function int    NearestBody(vector Loc);
 native function bool   BodyAttached(int Body);
@@ -246,27 +247,34 @@ function Decapitate(bool bSpawnHead)
 
 // Gib the corpse. Carcass.ChunkUp is Destroy(), which is why a gibbing kill
 // (Pawn.SpawnGibbedCarcass: Initfor + ChunkUp(-Health)) used to make the
-// fresh ragdoll vanish. Now every joint is destroyed natively and the skinned
+// fresh ragdoll vanish. Now the joints are destroyed natively and the skinned
 // bodies fly apart as closed, capped islands; the stock blood splashes and
 // one organ chunk are spawned on top (the stock torso/arm/thigh meshes are
-// replaced by our skinned parts). A gibbed corpse lives 20 s like stock gibs.
+// replaced by our skinned parts). How much comes apart scales with Damage
+// (plus chance): a glancing rocket tears a few parts off and leaves a trunk
+// that later hits can keep gibbing; only a fully scattered corpse is marked
+// bGibbed and gets the 20 s stock gib lifetime.
 function ChunkUp(int Damage)
 {
 	local vector Loc;
 	local Carcass Organ;
-	local int i, n;
+	local int i, n, Remaining;
 
 	if ( bGibbed )
 		return;
-	bGibbed = true;
 	if ( !GoreAllowed() )
 	{
+		bGibbed = true;
 		Destroy();
 		return;
 	}
 	if ( LastHitLocation == vect(0,0,0) )
 		LastHitLocation = Location;
-	Gib(Damage, LastHitLocation);
+	Remaining = Gib(Damage, LastHitLocation);
+	bGibbed = (Remaining == 0);
+	CumulativeDamage = 0;
+	for ( i=0; i<NUM_BONES; i++ )
+		PartDamage[i] = 0;
 
 	if ( BigBloodClass != None )
 		Spawn(BigBloodClass,,, Location, rot(-16384,0,0));
@@ -279,8 +287,9 @@ function ChunkUp(int Damage)
 			Spawn(BloodBurstClass,,, Loc, rot(16384,0,0));
 		}
 	}
-	if ( Level.bHighDetailMode && !Level.bDropDetail )
+	if ( Level.bHighDetailMode && !Level.bDropDetail && !bOrganSpawned )
 	{
+		bOrganSpawned = true;
 		if ( FRand() < 0.3 )
 			i = 0;
 		else if ( FRand() < 0.5 )
@@ -297,7 +306,8 @@ function ChunkUp(int Damage)
 	for ( i=0; i<3; i++ )
 		AddBleed(BONE_Spine + Rand(NUM_BONES - 1), 2.0);
 	PlayGibSound();
-	LifeSpan = 20;
+	if ( bGibbed )
+		LifeSpan = 20;
 }
 
 function PlayGibSound()
