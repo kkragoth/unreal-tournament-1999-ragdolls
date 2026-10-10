@@ -63,6 +63,9 @@ in height and checked for non-adjacent overlap in `build_rig_mixamo.py`
 
 ## Gore (dismemberment / decapitation / gibbing)
 
+NEXT SESSION: read `docs/handoff-2026-10-10-gore.md` first (playtest
+feedback: stump caps must become planar clipped cuts; per-model rigging).
+
 Implemented 2026-10-10 per `docs/plans/gore.md` (read its "Implementation
 notes" first). Natives `Dismember` / `RemovePart` / `Gib` /
 `GetBodyLocation` / `NearestBody` / `BodyAttached` live in

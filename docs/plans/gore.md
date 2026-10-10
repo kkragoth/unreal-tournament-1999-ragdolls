@@ -1,6 +1,10 @@
 # Plan: gore system (decapitation, dismemberment, gibbing) on the Box3D ragdoll
 
-Status: **IMPLEMENTED, NOT YET PLAYTESTED** (2026-10-10). All four tiers are
+Status: **IMPLEMENTED, PLAYTESTED ONCE** (2026-10-10). First playtest
+feedback: the stump caps look triangulated and stick out of the skin (fan
+caps over jagged non-planar seam rings, worst on the k-means fragment
+seams). Fix direction and handoff in `docs/handoff-2026-10-10-gore.md`
+(planar clipping cuts instead of dominant-bone partition). All four tiers are
 in (`RagdollPkg/Src/RagdollGore.cpp`, gore natives in `RagdollCarcass.cpp`,
 script in `RagdollCarcass.uc` / `RagdollMutator.uc`), built, deployed to both
 installs and exercised headlessly (`ucc server` + `RagdollTestMutator`:
