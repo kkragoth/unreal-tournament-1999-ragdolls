@@ -1,0 +1,17 @@
+{
+  "dataset": "SelectionFemale2",
+  "note": "Per-model joint tuning (degrees / Nm / UU). Starts as a copy of the global defaults; edit, then run tools/build_joint_tuning.py and rebuild the DLL.",
+  "joints": {
+    "spine":       {"type": "ball", "cone_deg": 25.8, "twist_deg": [-14.3, 14.3], "friction_nm": 0.8, "cone_axis": [0, 0, 0], "anchor_offset_uu": [0, 0, 0]},
+    "neck":        {"type": "ball", "cone_deg": 31.5, "twist_deg": [-20.1, 20.1], "friction_nm": 0.5, "cone_axis": [0, 0, 0], "anchor_offset_uu": [0, 0, 0]},
+    "head":        {"type": "ball", "cone_deg": 28.6, "twist_deg": [-20.1, 20.1], "friction_nm": 0.3, "cone_axis": [0, 0, 0], "anchor_offset_uu": [0, 0, 0]},
+    "upperarm_l":  {"type": "ball", "cone_deg": 90.0, "twist_deg": [-34.4, 34.4], "friction_nm": 0.3, "cone_axis": [-0.8, 0.55, -0.15], "anchor_offset_uu": [0, 0, 0]},
+    "upperarm_r":  {"type": "ball", "cone_deg": 90.0, "twist_deg": [-34.4, 34.4], "friction_nm": 0.3, "cone_axis": [0.8, 0.55, -0.15], "anchor_offset_uu": [0, 0, 0]},
+    "forearm_l":   {"type": "hinge", "range_deg": [-2.9, 126.1], "rest_deg": 20.1, "friction_nm": 0.15, "anchor_offset_uu": [0, 0, 0]},
+    "forearm_r":   {"type": "hinge", "range_deg": [-2.9, 126.1], "rest_deg": 20.1, "friction_nm": 0.15, "anchor_offset_uu": [0, 0, 0]},
+    "thigh_l":     {"type": "ball", "cone_deg": 49.8, "twist_deg": [-20.1, 20.1], "friction_nm": 0.5, "cone_axis": [-0.2, 0.45, -0.87], "anchor_offset_uu": [0, 0, 0]},
+    "thigh_r":     {"type": "ball", "cone_deg": 49.8, "twist_deg": [-20.1, 20.1], "friction_nm": 0.5, "cone_axis": [0.2, 0.45, -0.87], "anchor_offset_uu": [0, 0, 0]},
+    "shin_l":      {"type": "hinge", "range_deg": [-100.3, 2.9], "rest_deg": -14.9, "friction_nm": 0.25, "anchor_offset_uu": [0, 0, 0]},
+    "shin_r":      {"type": "hinge", "range_deg": [-100.3, 2.9], "rest_deg": -14.9, "friction_nm": 0.25, "anchor_offset_uu": [0, 0, 0]}
+  }
+}

@@ -1049,6 +1049,7 @@ INT RagdollFragmentBody( FRagdollState& S, INT Body, INT K, FLOAT DrawScale )
 		Bd.linearDamping   = 0.05f;
 		Bd.angularDamping  = 0.3f;
 		Bd.gravityScale    = 1.0f;
+		Bd.userData        = S.Owner;
 		b3BodyId Id = b3CreateBody( S.World, &Bd );
 		if( B3_IS_NULL( Id ) )
 			break;

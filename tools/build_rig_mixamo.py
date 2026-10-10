@@ -96,8 +96,88 @@ def bone_head(bones, name):
     return None
 
 
+def unpose_legs(verts, bones, weights):
+    """Straighten the selection pose's leg stance in place.
+
+    The selection meshes stand in a contrapposto: one hip ~5 UU ahead of the
+    other (pelvis yaw) and each shin tilted back 5-18 deg. The physics
+    skeleton is mirror-averaged, so without this every shin's skin sat ~3.5
+    UU in front of / behind its box (boots sank into the floor, legs looked
+    bent the wrong way; 2026-10-10). Each leg gets a rigid un-pose: hip
+    moved to the L/R mirrored position, thigh rotated about X until the knee
+    is straight below the hip, shin rotated about the knee until the ankle
+    is straight below it. Vertices blend the per-bone transforms by their
+    skin weights, so the hip/knee skin stays smooth; the armature heads and
+    tails of the leg bones follow. Returns the new vertex list."""
+    import math as _m
+    bmap = {b["name"]: b for b in bones}
+    need = ["mixamorig:%sUpLeg", "mixamorig:%sLeg", "mixamorig:%sFoot"]
+    if not all((n % s) in bmap for s in ("Left", "Right") for n in need):
+        return verts
+    hipL = bmap["mixamorig:LeftUpLeg"]["head"]
+    hipR = bmap["mixamorig:RightUpLeg"]["head"]
+    ax = (abs(hipL[0]) + abs(hipR[0])) / 2.0
+    ay = (hipL[1] + hipR[1]) / 2.0
+    az = (hipL[2] + hipR[2]) / 2.0
+
+    def rotx(p, t):
+        c, s = _m.cos(t), _m.sin(t)
+        return (p[0], p[1] * c - p[2] * s, p[1] * s + p[2] * c)
+
+    def sub(a, b):
+        return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+    def add(a, b):
+        return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+    # bone name -> transform (callable) for this un-pose
+    xf = {}
+    report = []
+    for side, sign in (("Left", -1.0), ("Right", 1.0)):
+        up, lg, ft = (bmap["mixamorig:%s%s" % (side, n)] for n in ("UpLeg", "Leg", "Foot"))
+        hip, knee, ankle = tuple(up["head"]), tuple(lg["head"]), tuple(ft["head"])
+        target = (sign * ax, ay, az)
+        v = sub(knee, hip)
+        a1 = _m.atan2(v[1], -v[2])              # thigh forward tilt
+        def T1(p, hip=hip, a1=a1, target=target):
+            return add(rotx(sub(p, hip), -a1), target)
+        knee2 = T1(knee)
+        v2 = sub(T1(ankle), knee2)
+        a2 = _m.atan2(v2[1], -v2[2])            # shin forward tilt after T1
+        def T2(p, T1=T1, knee2=knee2, a2=a2):
+            return add(rotx(sub(T1(p), knee2), -a2), knee2)
+        xf["mixamorig:%sUpLeg" % side] = T1
+        for n in ("Leg", "Foot", "ToeBase", "Toe_End"):
+            xf["mixamorig:%s%s" % (side, n)] = T2
+        report.append("%s thigh %+.1f deg shin %+.1f deg hip y %+.1f->%+.1f" % (side, _m.degrees(a1), _m.degrees(a2), hip[1], ay))
+        # armature: heads/tails follow the same transforms
+        for n, T in (("UpLeg", T1), ("Leg", T2), ("Foot", T2), ("ToeBase", T2), ("Toe_End", T2)):
+            b = bmap.get("mixamorig:%s%s" % (side, n))
+            if not b:
+                continue
+            b["head"] = list(T(tuple(b["head"])))
+            b["tail"] = list(T(tuple(b["tail"])))
+
+    out = []
+    for i, p in enumerate(verts):
+        p = tuple(p)
+        w = weights[i] or {}
+        tot = sum(w.values())
+        if tot <= 0.0 or not any(n in xf for n in w):
+            out.append(list(p))
+            continue
+        acc = [0.0, 0.0, 0.0]
+        for n, wt in w.items():
+            q = xf[n](p) if n in xf else p
+            acc[0] += wt * q[0]; acc[1] += wt * q[1]; acc[2] += wt * q[2]
+        out.append([acc[0] / tot, acc[1] / tot, acc[2] / tot])
+    print("  unposed legs:", "; ".join(report))
+    return out
+
+
 def build_rig_mixamo(data, live_name="Commando", sel_name="SelectionMale1"):
     verts, faces, bones, weights = load(data)
+    verts = unpose_legs(verts, bones, weights)
 
     # --- 1) Per-vertex labels from the skin weights -----------------------
     # Every vertex gets its dominant ragdoll bone. Feet are skipped from the
@@ -330,15 +410,35 @@ def build_rig_mixamo(data, live_name="Commando", sel_name="SelectionMale1"):
     bind_offsets = []
     bind_weights = []
     n_bone_verts = [0] * 14
+    # Shoulder pads (2026-10-10, user: "shoulderpads are treated like
+    # chest"): the clavicle bones ride the spine body (MIXAMO_MAP), which is
+    # right for the upper chest but wrong for the armour pads that sit
+    # OUTSIDE the shoulder joint - they belong to the upper arm (the Soldier's
+    # pads are 34 clavicle-dominant verts lateral of the shoulder anchor).
+    # Any clavicle weight on a vert lateral of the shoulder anchor and not
+    # far below it is routed to that side's upper arm instead. Binds only;
+    # the clusters, boxes and anchors above are unchanged. (verts, centers
+    # and anchors are all pelvis-relative here.)
+    pad_count = [0, 0]
+    PAD_BONES = {"mixamorig:LeftShoulder": (4, anchors[3]), "mixamorig:RightShoulder": (5, anchors[4])}
     for i, w in enumerate(weights):
         agg = {}
+        is_pad = False
         for bname, wt in w.items():
             b = MIXAMO_MAP.get(bname)
             if b is None:
                 continue
             if b in (12, 13):
                 b = 10 if b == 12 else 11
+            if bname in PAD_BONES:
+                arm, anc = PAD_BONES[bname]
+                vx, vz = verts[i][0], verts[i][2]
+                if abs(vx) > abs(anc[0]) - 0.5 and vz > anc[2] - 4.0 and (vx < 0) == (anc[0] < 0):
+                    b = arm
+                    is_pad = True
             agg[b] = agg.get(b, 0.0) + wt
+        if is_pad:
+            pad_count[0 if agg.get(4, 0.0) >= agg.get(5, 0.0) else 1] += 1
         # The physics Head body must own its skull: verts the cluster pass
         # assigned to Head (skull merged from Neck) bind there, overriding
         # Mixamo's neck-only weight so the skull follows the head body.
@@ -389,6 +489,7 @@ def build_rig_mixamo(data, live_name="Commando", sel_name="SelectionMale1"):
 
     per_bone = n_bone_verts
     print("  per-bone verts:", per_bone)
+    print(f"  shoulder-pad verts rebound clavicle->upper arm: L={pad_count[0]} R={pad_count[1]}")
     for b in range(12):
         if per_bone[b] < 2:
             print(f"  !! bone {br.BONE_NAMES[b]} under-weighted ({per_bone[b]})")

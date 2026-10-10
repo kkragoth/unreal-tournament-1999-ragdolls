@@ -61,10 +61,85 @@ from vertical) and ~doubled every joint range. Dataset body boxes are capped
 in height and checked for non-adjacent overlap in `build_rig_mixamo.py`
 (the spine box used to reach into the thigh boxes and jam the hips).
 
+## Self-collision, corpse stacking, per-model joints
+
+Implemented 2026-10-10 (evening), see `docs/handoff-2026-10-10-next.md`
+"Status" for the headless measurements. NOT yet playtested in the client.
+
+- Self-collision: Box3D joints default to `collideConnected = false`, so a
+  body could pass through the one body it is jointed to (upper arm through
+  the spine box = "arms pass through the torso"). The shoulder and hip
+  joints now collide (`bSelfCollide`, globalconfig bool on `RagdollCarcass`,
+  default true, read at `BuildRagdoll`); their child hulls are trimmed at
+  the socket by the rest-pose overlap (`RagdollTrimChildBox`, offset hull
+  via `b3MakeOffsetBoxHull`, body origin unchanged so skinning is
+  unaffected). Elbows/knees/neck stay non-colliding (their boxes overlap by
+  construction). Non-adjacent bodies and other corpses always collided
+  (same world, same category); corpses rest on each other (headless pile:
+  10-12 of 16 pelvises >15 UU above the floor).
+- Diagnostics: `RagdollPkg: contacts <corpse> sync=N geom= self_joint=
+  self_other= corpses= asleep= pairs:` for the first 8 corpses at sync
+  50/150/300 (`LogRagdollContacts`; `Nj` = jointed pair, `N-frag` =
+  fragment body). Every body carries its `ARagdollCarcass*` as Box3D user
+  data (`FRagdollState::Owner`). `RagdollTestMutator` also runs a
+  two-corpse stacking test (`stack lowerTopZ=... pelvisXYdist=`) and logs
+  the gore pile (`pileTopZ`, `raisedPelvises`).
+- Per-model joints: `tools/rigs/<Sel>.tuning.json` (degrees / Nm / UU
+  anchor offsets, one line per joint) -> `python tools/build_joint_tuning.py`
+  -> `RagdollPkg/Src/RagdollJointTuning.h` (`GRagdollJointTuning[]`, looked
+  up by dataset name in `BuildRagdollImpl`; global table
+  `GRagdollDefaultJoints` for models without a file). Rebuild the DLL only
+  (no `ucc make`). The five files currently equal the global defaults
+  (`--init` writes them), so behaviour is unchanged until someone edits one.
+  Console multipliers still apply on top. Log line:
+  `RagdollPkg: joints <corpse> table=<dataset|global> ...`. Hinges also carry
+  `rest_deg` (spec slot `L2`): the joint spring's rest angle, elbow +20 /
+  knee -15 by default, because a spring aimed at exactly straight parked
+  most elbows and knees ON the hyperextension stop (stiff straight limbs).
+- Deploy check before reading a playtest log: compare the install's
+  `System\RagdollPkg.dll` / `.u` timestamps with the repo's `System\` and
+  the other install. The 2026-10-10 "ragdolls dont look ok" screenshot came
+  from D:\old running a build two deploys behind (the game had held the
+  files locked), so every limit in its `jointangles` lines was the old one.
+- Joint geometry facts (2026-10-10 playtest): Box3D CLAMPS every spherical
+  cone to 90 deg and centres it on frame A's z axis. With identity frames
+  that is the hanging limb, so arms could never pass horizontal and legs
+  raised at most the hip cone. Ball joints therefore carry a `cone_axis`
+  (bind space, left = -X, front = +Y, up = +Z): shoulders aim out+forward
+  (whole front/outer hemisphere), hips ~36 deg forward of down. The bind
+  pose sits off-centre inside the cone with zero twist (`RagdollShortestArc`
+  frames in `AddJoint`). Every joint also has a weak spring toward the bind
+  pose (`JointSpringHertz` 0.8 / `JointSpringDamping` 0.8, globalconfig; 0
+  = off) so limbs stop settling at a limit. `RagdollPkg: jointangles`
+  (first 8 corpses, sync 50/150/300) prints every joint's angle against its
+  limits with `!` at a limit; `RagdollPkg: underfloor` lists bodies with
+  level geometry just above them and none below.
+- Gore roll (2026-10-10, "gibbing way too easily"): native `Gib` cuts ONE
+  part mostly, two rarely, three very rarely (odds scale with damage, 25%/5%
+  at 80), forearms/shins below 90 damage and whole limbs above, spine/neck
+  never short of a TOTAL gib at 250+ damage. Script `Blast()` wraps it (once
+  per tick: a gibbing kill arrives via ApplyDeathGore AND the engine's
+  ChunkUp). Corpse hits: explosive >= 40 damage = Blast; smaller hits
+  accumulate per part (`PartThreshold`); only 250+ or 3x Mass cumulative
+  gibs outright. Body fragmentation (random-plane chunks with fan caps, the
+  "torso collapsing into pieces") is behind `bFragmentBodies`, default off.
+- Shoulder pads: `build_rig_mixamo.py` routes clavicle weights on verts
+  lateral of the shoulder anchor to the upper arm (binds only; boxes and
+  anchors unchanged). Regenerate with the documented header command.
+- Leg stance: the selection meshes stand in a contrapposto (one hip ~5 UU
+  ahead, shins tilted back 5-18 deg) while the physics skeleton is
+  mirror-averaged, so every shin's skin sat ~3.5 UU off its box (boots
+  into the floor, legs bent wrong). `unpose_legs` in `build_rig_mixamo.py`
+  now straightens both legs with weight-blended rigid transforms before
+  anything is derived. Check with the offline vertex-cloud-vs-box means
+  (should be ~0) after any rig regeneration.
+- Overhang hulls: skin past the distal faces of the shins, forearms and
+  head (toes, heel, hands, skull) gets a second hull on the same body
+  (`RagdollAddOverhangHull`, logged as `RagdollPkg: overhang hull`), so
+  feet no longer clip into the floor on a face-down corpse.
+
 ## Gore (dismemberment / decapitation / gibbing)
 
-NEXT SESSION: read `docs/handoff-2026-10-10-next.md` first (next work:
-per-model joint configuration, ragdoll self-collision / corpse stacking).
 Planar cuts exist but are OFF by default (`bPlanarCuts`, globalconfig bool;
 the user found them "a bit broken visually"); the default split is the
 dominant-bone one described in `docs/plans/gore.md`.

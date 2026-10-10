@@ -53,15 +53,20 @@ var() globalconfig bool bBoxMannequins;
 // corpse without a rebuild; persisted under [RagdollPkg.RagdollCarcass]).
 //   JointFrictionScale  multiplies every joint's friction torque (1 = defaults)
 //   JointLimitScale     multiplies every joint's cone/hinge range (1 = defaults)
-//   AngularDamping      per-body angular damping (1/s); lower = floppier
-//   DeathSpin           random angular velocity (rad/s) given to each body at death
+//   AngularDamping      per-body angular damping (1/s); lower = floppier (default 0.4)
+//   DeathSpin           random angular velocity (rad/s) given to each body at death (default 1.2)
 //   PoseVariation       spread of the random spawn pose (0 = fixed weapon-aim
 //                       pose for every corpse, 1 = default, up to 2)
+//   JointSpringHertz    weak spring on every joint toward the neutral pose
+//                       (tissue stiffness); 0 = off, default 0.8
+//   JointSpringDamping  damping ratio of that spring (default 0.8)
 var() globalconfig float JointFrictionScale;
 var() globalconfig float JointLimitScale;
 var() globalconfig float AngularDamping;
 var() globalconfig float DeathSpin;
 var() globalconfig float PoseVariation;
+var() globalconfig float JointSpringHertz;
+var() globalconfig float JointSpringDamping;
 
 // Gore bookkeeping (script-only; appended after the natively mirrored vars so
 // the C++ class layout in RagdollPkgClasses.h stays valid).
@@ -83,6 +88,17 @@ var() globalconfig float DismemberScale;
 //                   split with centroid fans. The planar version looked
 //                   broken in the 2026-10-10 playtest; off until understood.
 var() globalconfig bool  bPlanarCuts;
+//   bSelfCollide    true (default) = the upper arms collide with the torso and
+//                   the thighs with the pelvis (Box3D joints otherwise let a
+//                   body pass through the one body it is jointed to); their
+//                   hulls are trimmed at the socket so the pair starts clear.
+//                   Read at BuildRagdoll, so it applies to the next corpse.
+var() globalconfig bool  bSelfCollide;
+//   bFragmentBodies false (default) = a torn-off head/torso/pelvis/thigh
+//                   stays in one piece; true = it shatters into random-plane
+//                   chunks as well (the "torso collapsing into pieces with
+//                   fan-outs" from the 2026-10-10 playtest).
+var() globalconfig bool  bFragmentBodies;
 
 var float  PartDamage[14];     // damage accumulated per body by hits on the corpse
 var bool   bDecapitated;
@@ -91,6 +107,7 @@ var bool   bBoss;
 var vector LastHitLocation;    // killing blow (from RagdollMutator) or last corpse hit
 var vector LastHitMomentum;
 var bool   bOrganSpawned;
+var float  LastBlastTime;      // Blast() runs once per tick (death hook + engine ChunkUp arrive together)
 
 // Stock Botpack classes, loaded by name so the package depends on Engine only.
 var class<Actor>   BloodBurstClass;   // UT_BloodBurst: sprite burst at a cut
@@ -150,20 +167,77 @@ function TakeDamage(int Damage, Pawn instigatedBy, Vector hitlocation, Vector mo
 		PaintWound(hitlocation, momentum, Damage, damageType);   // every hit on the corpse, not only the kill
 	}
 
+	// Hits on the corpse (2026-10-10 rework, user: "gibbing way too easily"):
+	//  - only redeemer-class damage, or a corpse worn down by 3x its mass,
+	//    gibs it outright (ChunkUp);
+	//  - an explosive hit of 40+ is a Blast: one part mostly, two rarely,
+	//    three very rarely (the odds and whole-limb-vs-forearm choice are in
+	//    the native Gib);
+	//  - everything smaller accumulates on the part that was hit and tears
+	//    it off past its threshold (shot damage counts 40%).
 	Scaled = Damage;
 	if ( damageType == 'shot' )
 		Scaled *= 0.4;
 	CumulativeDamage += Scaled;
-	if ( (Scaled > 0.4 * Mass) || (CumulativeDamage > 0.8 * Mass) )
+	if ( Damage >= 250 || CumulativeDamage > 3.0 * Mass )
 	{
 		ChunkUp(Damage);
 		return;
 	}
-	if ( GoreLevel < 2 || !GoreAllowed() || Body < 0 || Body >= NUM_BONES || !BodyAttached(Body) )
+	if ( GoreLevel < 2 || !GoreAllowed() )
+		return;
+	if ( IsExplosive(damageType) && Damage >= 40 * DismemberScale )
+	{
+		Blast(Damage, hitlocation);
+		return;
+	}
+	if ( Body < 0 || Body >= NUM_BONES || !BodyAttached(Body) )
 		return;
 	PartDamage[Body] += Scaled;
 	if ( PartDamage[Body] > PartThreshold(Body) * DismemberScale )
 		TearOff(Body, momentum, Damage);
+}
+
+function bool IsExplosive(name Type)
+{
+	return (Type == 'exploded') || (Type == 'shredded') || (Type == 'RedeemerDeath')
+		|| (Type == 'pounded') || (Type == 'jolted') || (Type == 'zapped') || (Type == 'Gibbed');
+}
+
+// A blast on the corpse: the native Gib picks how many parts (1 / 2 / 3 by
+// damage, everything at 250+) and which (nearest the hit; forearms/shins
+// below 90 damage, whole limbs above). Blood and a sound per part. Runs at
+// most once per tick: a gibbing kill reaches the corpse twice in the same
+// tick (ApplyDeathGore from Initfor, then the engine's ChunkUp(-Health)).
+function int Blast(int Damage, vector HitLoc)
+{
+	local int i, Before, After, Cut;
+
+	if ( Level.TimeSeconds - LastBlastTime < 0.05 && LastBlastTime > 0 )
+		return 0;
+	LastBlastTime = Level.TimeSeconds;
+	for ( i=1; i<NUM_BONES; i++ )
+		if ( BodyAttached(i) )
+			Before++;
+	if ( HitLoc == vect(0,0,0) )
+		HitLoc = Location;
+	Gib(Damage, HitLoc);
+	for ( i=1; i<NUM_BONES; i++ )
+		if ( BodyAttached(i) )
+			After++;
+	Cut = Before - After;
+	if ( Cut <= 0 )
+		return 0;
+	if ( BloodBurstClass != None )
+		for ( i=0; i<Min(Cut + 1, 4); i++ )
+			Spawn(BloodBurstClass,,, HitLoc + VRand() * 8, rot(16384,0,0));
+	for ( i=0; i<Min(Cut, 3); i++ )
+		AddBleed(BONE_Spine + Rand(NUM_BONES - 1), 2.0);
+	if ( Cut >= 3 )
+		PlayGibSound();
+	else
+		PlayCutSound();
+	return Cut;
 }
 
 function float PartThreshold(int Body)
@@ -280,7 +354,11 @@ function ChunkUp(int Damage)
 	}
 	if ( LastHitLocation == vect(0,0,0) )
 		LastHitLocation = Location;
-	Remaining = Gib(Damage, LastHitLocation);
+	Blast(Damage, LastHitLocation);
+	Remaining = 0;
+	for ( i=1; i<NUM_BONES; i++ )
+		if ( BodyAttached(i) )
+			Remaining++;
 	bGibbed = (Remaining == 0);
 	CumulativeDamage = 0;
 	for ( i=0; i<NUM_BONES; i++ )
@@ -505,10 +583,15 @@ function ApplyDeathGore(Pawn P)
 		return;
 	Overkill = -P.Health;
 	Body = NearestBody(HitLoc);
-	bExplosive = (Type == 'exploded') || (Type == 'shredded') || (Type == 'RedeemerDeath')
-		|| (Type == 'pounded') || (Type == 'jolted') || (Type == 'zapped');
+	bExplosive = IsExplosive(Type);
+	// Killing blow: an explosive of 40+ is a Blast (1 part mostly, see
+	// Blast / native Gib); a smaller explosive only tears the nearest part on
+	// a clear overkill; a heavy shot the same. Gibbing kills (engine calls
+	// ChunkUp right after Initfor) are covered by Blast's once-per-tick guard.
 	if ( Type == 'Decapitated' )
 		TearOff(BONE_Head, Mom, Dmg);
+	else if ( bExplosive && Dmg >= 40 * DismemberScale )
+		Blast(Dmg, HitLoc);
 	else if ( bExplosive && Overkill >= 15 * DismemberScale )
 		TearOff(Body, Mom, Dmg);
 	else if ( Type == 'shot' && Dmg >= 45 && Overkill >= 5 * DismemberScale )
@@ -573,12 +656,16 @@ defaultproperties
 {
 	SimFreq=50.0
 	SimSubSteps=4
+	bSelfCollide=True
+	bFragmentBodies=False
+	JointSpringHertz=0.8
+	JointSpringDamping=0.8
 	DeathImpulseScale=1.0
 	bBoxMannequins=false
 	JointFrictionScale=1.0
 	JointLimitScale=1.0
-	AngularDamping=0.15
-	DeathSpin=2.0
+	AngularDamping=0.4
+	DeathSpin=1.2
 	PoseVariation=1.0
 	GoreLevel=2
 	DismemberScale=1.0
