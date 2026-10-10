@@ -21,6 +21,24 @@ const FRagdollDatasetEntry* FindRagdollDataset( const TCHAR* LiveMeshName )
 	return NULL;
 }
 
+FLOAT RagdollFloatProp( UObject* Obj, const TCHAR* Name, FLOAT Default )
+{
+	guard(RagdollFloatProp);
+	if( !Obj )
+		return Default;
+	for( TFieldIterator<UFloatProperty> It( Obj->GetClass() ); It; ++It )
+	{
+		UFloatProperty* P = *It;
+		if( appStricmp( P->GetName(), Name ) == 0 )
+		{
+			FLOAT V = *(FLOAT*)( (BYTE*)Obj + P->Offset );
+			return V < 0.0f ? Default : V;
+		}
+	}
+	return Default;
+	unguard;
+}
+
 UBOOL RagdollForceBoxes( UObject* Obj )
 {
 	guard(RagdollForceBoxes);

@@ -97,6 +97,21 @@ inspect any bone).
 >25% arm weight. Zero on all models; with the Mixamo rigs it was 16-30 per
 model.
 
+## Physics skeleton sanity (2026-10-10, second pass)
+
+`build_rig_mixamo.py` now caps the half extents in all three axes (spine
+hz<=9, head hz<=6 - the Commando's hair spike had made a 27 UU head box),
+mirror-averages L/R half extents, enforces pelvis/spine/head minimum sizes,
+and runs a non-adjacent overlap resolver (longer box shifted away and
+shortened along the tightest axis, 0.4 UU gap). Before this the spine box
+reached 1-3 UU into the thigh boxes on four models and the forearms touched
+the thighs on SGirl, so those bodies fought each other every step and the
+corpses read as stiff. The hip anchor is now the upper-thigh slab centroid
+(SGirl's used to sit 1.5 UU from the mid-plane).
+
+Joint friction/limits/damping were retuned at the same time; see the
+"Physics tuning knobs" section in AGENTS.md for the console knobs.
+
 ## Knobs / known limits
 
 - Arm/trunk seam: shoulder pads of Male1 end up on the upper-arm bones (they

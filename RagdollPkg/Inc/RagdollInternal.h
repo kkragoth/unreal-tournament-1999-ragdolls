@@ -157,6 +157,11 @@ struct FRagdollDatasetEntry
 // falls back to the procedural box mannequin).
 const FRagdollDatasetEntry* FindRagdollDataset( const TCHAR* LiveMeshName );
 
+// Read a FLOAT script property by name through the class property list (same
+// mechanism as RagdollForceBoxes, so console "set" tuning is picked up by the
+// next corpse). Returns Default when the property is missing or negative.
+FLOAT RagdollFloatProp( UObject* Obj, const TCHAR* Name, FLOAT Default );
+
 // True when the class config flag bBoxMannequins forces box-mannequin corpses,
 // overriding any available real-mesh dataset. Toggled at runtime with
 // "set RagdollPkg.RagdollCarcass bBoxMannequins 1" or via UnrealTournament.ini

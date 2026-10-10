@@ -89,12 +89,23 @@ struct FRagdollJointSpec
 {
 	EJointKind Kind;
 	FLOAT L0, L1, L2;
-	FLOAT Friction; // motor friction torque multiplier (x5 Nm)
+	FLOAT Friction; // joint friction torque in Nm (scaled by JointFrictionScale)
 };
 
 // Anchor offsets are canonical (relative to the pelvis) and are scaled by
 // DrawScale here to match the scaled bodies. Defs selects the active skeleton:
 // GRagdollBoneDefs (box fallback) or a per-model dataset's derived bones.
+// Live tuning knobs (RagdollCarcass.uc globalconfig floats), filled per
+// BuildRagdoll from the carcass so console "set" changes apply to new corpses.
+static FLOAT GJointFrictionScale = 1.0f;
+static FLOAT GJointLimitScale    = 1.0f;
+
+static FLOAT ClampAngle( FLOAT A )
+{
+	const FLOAT Lim = 0.98f * PI;
+	return A > Lim ? Lim : ( A < -Lim ? -Lim : A );
+}
+
 static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FRagdollBoneDef* Defs, const FVector& AnchorCanonical, FLOAT DrawScale, const FRagdollJointSpec& Spec )
 {
 	const FRagdollBoneDef& DA = Defs[BodyA];
@@ -124,11 +135,14 @@ static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FRagdollBone
 		J.base.localFrameB   = FrameB;
 		J.targetAngle        = 0.0f;
 		J.enableLimit        = true;
-		J.lowerAngle         = Spec.L0;
-		J.upperAngle         = Spec.L1;
+		J.lowerAngle         = ClampAngle( Spec.L0 * GJointLimitScale );
+		J.upperAngle         = ClampAngle( Spec.L1 * GJointLimitScale );
 		J.enableSpring       = false;
+		// Motor at zero speed = Coulomb joint friction. Keep it SMALL: the old
+		// 1.5-2.4 Nm brakes were 15-50% of the limbs' gravity torque, so limbs
+		// stopped 20-35 deg from vertical and never moved again (stiff corpse).
 		J.enableMotor        = true;
-		J.maxMotorTorque     = Spec.Friction * 3.0f;
+		J.maxMotorTorque     = Spec.Friction * GJointFrictionScale;
 		J.motorSpeed         = 0.0f;
 		b3CreateRevoluteJoint( S.World, &J );
 	}
@@ -140,13 +154,13 @@ static void AddJoint( FRagdollState& S, INT BodyA, INT BodyB, const FRagdollBone
 		J.base.localFrameA   = FrameA;
 		J.base.localFrameB   = FrameB;
 		J.enableConeLimit    = true;
-		J.coneAngle          = Spec.L0;
+		J.coneAngle          = Min( Spec.L0 * GJointLimitScale, 0.98f * PI );
 		J.enableTwistLimit   = true;
-		J.lowerTwistAngle    = Spec.L1;
-		J.upperTwistAngle    = Spec.L2;
+		J.lowerTwistAngle    = ClampAngle( Spec.L1 * GJointLimitScale );
+		J.upperTwistAngle    = ClampAngle( Spec.L2 * GJointLimitScale );
 		J.enableSpring       = false;
 		J.enableMotor        = true;
-		J.maxMotorTorque     = Spec.Friction * 3.0f;
+		J.maxMotorTorque     = Spec.Friction * GJointFrictionScale;
 		J.motorVelocity      = b3Vec3_zero;
 		b3CreateSphericalJoint( S.World, &J );
 	}
@@ -312,6 +326,8 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 		DeathVel *= MaxImpulse / BaseSpeed;
 
 	// Ragdoll bodies.
+	const FLOAT AngDamp   = RagdollFloatProp( C, TEXT("AngularDamping"), 0.15f );
+	const FLOAT DeathSpin = RagdollFloatProp( C, TEXT("DeathSpin"), 3.0f );
 	for( INT i=0; i<S.NumBodies; i++ )
 	{
 		const FRagdollBoneDef& D = Defs[i];
@@ -322,7 +338,7 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 		Bd.position       = { Center.X*RAGDOLL_U2M, Center.Y*RAGDOLL_U2M, Center.Z*RAGDOLL_U2M };
 		Bd.rotation       = b3Quat_identity;
 		Bd.linearDamping  = 0.05f;
-		Bd.angularDamping = 0.35f;   // floppier than 0.6: limbs keep swinging
+		Bd.angularDamping = AngDamp;   // low: limbs keep swinging (tune: AngularDamping)
 		Bd.gravityScale   = 1.0f;
 		S.Bodies[i] = b3CreateBody( S.World, &Bd );
 
@@ -335,9 +351,9 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 		V.z = DeathVel.Z + ( appFrand() * 2.0f - 1.0f ) * 0.3f;
 		b3Body_SetLinearVelocity( S.Bodies[i], V );
 		b3Vec3 W;
-		W.x = ( appFrand() * 2.0f - 1.0f ) * 1.8f;
-		W.y = ( appFrand() * 2.0f - 1.0f ) * 1.8f;
-		W.z = ( appFrand() * 2.0f - 1.0f ) * 1.2f;
+		W.x = ( appFrand() * 2.0f - 1.0f ) * DeathSpin;
+		W.y = ( appFrand() * 2.0f - 1.0f ) * DeathSpin;
+		W.z = ( appFrand() * 2.0f - 1.0f ) * DeathSpin * 0.66f;
 		b3Body_SetAngularVelocity( S.Bodies[i], W );
 
 		FLOAT HX = D.HX * DrawScale * RAGDOLL_U2M;
@@ -382,23 +398,28 @@ static void BuildRagdollImpl( ARagdollCarcass* C )
 	};
 	const FVector* Anch = DS ? DS->Anchors : CanonicalAnchors;
 
-	AddJoint( S, BONE_Pelvis,    BONE_Spine,     Defs, Anch[0], DrawScale, { JK_Ball, 0.35f, -0.26f,  0.26f, 0.6f } );
-	AddJoint( S, BONE_Spine,     BONE_Neck,      Defs, Anch[1], DrawScale, { JK_Ball, 0.61f, -0.35f,  0.35f, 0.8f } );
-	AddJoint( S, BONE_Neck,      BONE_Head,      Defs, Anch[2], DrawScale, { JK_Ball, 0.44f, -0.26f,  0.26f, 0.4f } );
-	AddJoint( S, BONE_Spine,     BONE_UpperArmL, Defs, Anch[3], DrawScale, { JK_Ball, 1.40f, -0.44f,  0.44f, 0.7f } );
-	AddJoint( S, BONE_Spine,     BONE_UpperArmR, Defs, Anch[4], DrawScale, { JK_Ball, 1.40f, -0.44f,  0.44f, 0.7f } );
-	AddJoint( S, BONE_UpperArmL, BONE_ForearmL,  Defs, Anch[5], DrawScale, { JK_Hinge, -0.12f, 1.10f, 0.0f, 0.5f } );
-	AddJoint( S, BONE_UpperArmR, BONE_ForearmR,  Defs, Anch[6], DrawScale, { JK_Hinge, -0.12f, 1.10f, 0.0f, 0.5f } );
-	AddJoint( S, BONE_Pelvis,    BONE_ThighL,    Defs, Anch[7], DrawScale, { JK_Ball, 1.22f, -0.52f,  0.52f, 0.8f } );
-	AddJoint( S, BONE_Pelvis,    BONE_ThighR,    Defs, Anch[8], DrawScale, { JK_Ball, 1.22f, -0.52f,  0.52f, 0.8f } );
-	AddJoint( S, BONE_ThighL,    BONE_ShinL,     Defs, Anch[9], DrawScale, { JK_Hinge, -1.30f, 0.12f, 0.0f, 0.6f } );
-	AddJoint( S, BONE_ThighR,    BONE_ShinR,     Defs, Anch[10], DrawScale, { JK_Hinge, -1.30f, 0.12f, 0.0f, 0.6f } );
+	// Ranges sized for a corpse (shoulder ~140 deg cone, elbow/knee ~130-140 deg
+	// one-sided flexion, hip ~100 deg cone); friction in Nm, tiny versus the
+	// limbs' gravity torque (upper arm ~4 Nm, thigh ~10 Nm) so joints flop.
+	GJointFrictionScale = RagdollFloatProp( C, TEXT("JointFrictionScale"), 1.0f );
+	GJointLimitScale    = RagdollFloatProp( C, TEXT("JointLimitScale"), 1.0f );
+	AddJoint( S, BONE_Pelvis,    BONE_Spine,     Defs, Anch[0], DrawScale, { JK_Ball, 0.60f, -0.40f,  0.40f, 0.8f } );
+	AddJoint( S, BONE_Spine,     BONE_Neck,      Defs, Anch[1], DrawScale, { JK_Ball, 0.80f, -0.50f,  0.50f, 0.5f } );
+	AddJoint( S, BONE_Neck,      BONE_Head,      Defs, Anch[2], DrawScale, { JK_Ball, 0.70f, -0.50f,  0.50f, 0.3f } );
+	AddJoint( S, BONE_Spine,     BONE_UpperArmL, Defs, Anch[3], DrawScale, { JK_Ball, 2.40f, -0.80f,  0.80f, 0.3f } );
+	AddJoint( S, BONE_Spine,     BONE_UpperArmR, Defs, Anch[4], DrawScale, { JK_Ball, 2.40f, -0.80f,  0.80f, 0.3f } );
+	AddJoint( S, BONE_UpperArmL, BONE_ForearmL,  Defs, Anch[5], DrawScale, { JK_Hinge, -0.05f, 2.40f, 0.0f, 0.15f } );
+	AddJoint( S, BONE_UpperArmR, BONE_ForearmR,  Defs, Anch[6], DrawScale, { JK_Hinge, -0.05f, 2.40f, 0.0f, 0.15f } );
+	AddJoint( S, BONE_Pelvis,    BONE_ThighL,    Defs, Anch[7], DrawScale, { JK_Ball, 1.70f, -0.60f,  0.60f, 0.4f } );
+	AddJoint( S, BONE_Pelvis,    BONE_ThighR,    Defs, Anch[8], DrawScale, { JK_Ball, 1.70f, -0.60f,  0.60f, 0.4f } );
+	AddJoint( S, BONE_ThighL,    BONE_ShinL,     Defs, Anch[9], DrawScale, { JK_Hinge, -2.30f, 0.05f, 0.0f, 0.2f } );
+	AddJoint( S, BONE_ThighR,    BONE_ShinR,     Defs, Anch[10], DrawScale, { JK_Hinge, -2.30f, 0.05f, 0.0f, 0.2f } );
 	// Feet are skipped from real-mesh ragdolls; only the box skeleton keeps the
 	// ankle joints (bodies 12/13 only exist in the box path).
 	if( !DS )
 	{
-		AddJoint( S, BONE_ShinL, BONE_FootL, Defs, Anch[11], DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
-		AddJoint( S, BONE_ShinR, BONE_FootR, Defs, Anch[12], DrawScale, { JK_Ball, 0.44f, -0.35f,  0.35f, 0.3f } );
+		AddJoint( S, BONE_ShinL, BONE_FootL, Defs, Anch[11], DrawScale, { JK_Ball, 0.60f, -0.35f,  0.35f, 0.1f } );
+		AddJoint( S, BONE_ShinR, BONE_FootR, Defs, Anch[12], DrawScale, { JK_Ball, 0.60f, -0.35f,  0.35f, 0.1f } );
 	}
 
 	// Lift bodies that spawned inside level geometry (ramp/stairs deaths) so the

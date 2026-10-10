@@ -444,9 +444,12 @@ def derive_armature(T, side, floor, H, thr, arms):
     # legs
     for s, L, R in ((-1, "Left", "L"), (1, "Right", "R")):
         lv = legs[s]
-        hip = cen([i for i in lv if hip_z - 0.06 * H <= T[i][2] <= hip_z],
-                  (s * 0.12 * H, trunk_y(hip_z), hip_z))
-        hip = (hip[0], hip[1], hip_z)
+        # Hip joint sits above the thigh column: take the upper-thigh slab
+        # (clear of the crotch/pelvis-front verts that sit near x=0 and would
+        # drag a plain band mean toward the mid-plane) and lift it to hip_z.
+        th = cen([i for i in lv if hip_z - 0.12 * H <= T[i][2] <= hip_z - 0.04 * H],
+                 (s * 0.12 * H, trunk_y(hip_z), hip_z))
+        hip = (th[0] if abs(th[0]) >= 3.0 else s * max(3.0, abs(th[0])), th[1], hip_z)
         knee_z = floor + 0.31 * H
         knee = cen([i for i in lv if abs(T[i][2] - knee_z) <= 3.0], (hip[0], hip[1], knee_z))
         knee = (knee[0], knee[1], knee_z)

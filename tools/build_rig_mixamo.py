@@ -187,9 +187,16 @@ def build_rig_mixamo(data, live_name="Commando", sel_name="SelectionMale1"):
 
     # Half extents from cluster extents, capped (physics boxes are slimmer
     # than the visual surface so non-adjacent bodies don't interpenetrate).
-    caps = {0: (9.0, 6.0), 1: (7.0, 5.0), 2: (2.6, 2.6), 3: (4.2, 4.2),
-            4: (2.2, 2.2), 5: (2.2, 2.2), 6: (1.8, 1.8), 7: (1.8, 1.8),
-            8: (3.2, 3.2), 9: (3.2, 3.2), 10: (2.6, 2.6), 11: (2.6, 2.6)}
+    # (cap_x, cap_y, cap_z): the physics boxes are slimmer AND shorter than
+    # the visual cluster so non-adjacent bodies never spawn interpenetrating
+    # (an uncapped spine reached into the thigh tops, an uncapped head box
+    # swallowed a hair spike and stood 27 UU tall - both jam the ragdoll).
+    caps = {0: (9.0, 6.0, 5.0), 1: (7.0, 5.0, 9.0), 2: (2.6, 2.6, 2.5),
+            3: (4.2, 4.2, 6.0),
+            4: (2.2, 2.2, 9.0), 5: (2.2, 2.2, 9.0), 6: (1.8, 1.8, 9.0),
+            7: (1.8, 1.8, 9.0), 8: (3.2, 3.2, 11.0), 9: (3.2, 3.2, 11.0),
+            10: (2.6, 2.6, 12.0), 11: (2.6, 2.6, 12.0)}
+    mins = {0: (5.0, 4.0, 3.0), 1: (4.0, 3.0, 5.0), 3: (3.0, 3.0, 3.5)}
     halves = []
     for b in range(14):
         cl = clusters[b]
@@ -200,10 +207,17 @@ def build_rig_mixamo(data, live_name="Commando", sel_name="SelectionMale1"):
         hx = max(abs(verts[i][0] - c[0]) for i in cl)
         hy = max(abs(verts[i][1] - c[1]) for i in cl)
         hz = max(abs(verts[i][2] - c[2]) for i in cl)
-        cx, cy = caps.get(b, (2.0, 2.0))
+        cx, cy, cz = caps.get(b, (2.0, 2.0, 8.0))
         hmin = 1.0 if b < 4 else 2.0
-        halves.append((max(min(hx, cx), hmin), max(min(hy, cy), hmin),
-                       max(hz, hmin)))
+        mx_, my_, mz_ = mins.get(b, (hmin, hmin, hmin))
+        halves.append((max(min(hx, cx), mx_), max(min(hy, cy), my_),
+                       max(min(hz, cz), mz_)))
+    # Mirror-average L/R half extents (centers already are) so both limbs
+    # weigh and swing the same.
+    for b in (4, 6, 8, 10):
+        hl, hr = halves[b], halves[b + 1]
+        avg = tuple((hl[k] + hr[k]) / 2.0 for k in range(3))
+        halves[b] = halves[b + 1] = avg
     # Trunk stack ordering: Spine must stop where Head begins.
     top_spine = centers[1][2] + halves[1][2]
     bot_head = centers[3][2] - halves[3][2]
@@ -219,6 +233,49 @@ def build_rig_mixamo(data, live_name="Commando", sel_name="SelectionMale1"):
         new_hz = (knee_top - mnz) / 2.0 + 1.0
         centers[b] = (centers[b][0], centers[b][1], new_cz)
         halves[b] = (halves[b][0], halves[b][1], new_hz)
+
+    # Non-adjacent bodies must not interpenetrate at spawn: resolve any
+    # remaining overlap by moving the LONGER box's center away along the
+    # tightest axis and shortening it by the same amount (the far end stays
+    # put), leaving a small gap. Jointed (adjacent) pairs are allowed to touch.
+    def _pen(a, b):
+        best, axis = None, 0
+        for k in range(3):
+            p = halves[a][k] + halves[b][k] - abs(centers[a][k] - centers[b][k])
+            if best is None or p < best:
+                best, axis = p, k
+        return best, axis
+
+    for _ in range(4):
+        moved = False
+        for a in range(12):
+            for b in range(a + 1, 12):
+                if (a, b) in br.ADJACENT or (b, a) in br.ADJACENT:
+                    continue
+                p, k = _pen(a, b)
+                if p <= 0.0:
+                    continue
+                big = a if halves[a][k] >= halves[b][k] else b
+                oth = b if big == a else a
+                sgn = 1.0 if centers[big][k] >= centers[oth][k] else -1.0
+                d = p + 0.4
+                c = list(centers[big])
+                h = list(halves[big])
+                c[k] += sgn * d / 2.0
+                h[k] = max(1.0, h[k] - d / 2.0)
+                centers[big] = tuple(c)
+                halves[big] = tuple(h)
+                print(f"  clearance: {br.BONE_NAMES[big]} vs {br.BONE_NAMES[oth]} "
+                      f"pen={p:.1f} axis={'xyz'[k]} -> shrunk/shifted")
+                moved = True
+        if not moved:
+            break
+    left = [(br.BONE_NAMES[a], br.BONE_NAMES[b], round(_pen(a, b)[0], 2))
+            for a in range(12) for b in range(a + 1, 12)
+            if (a, b) not in br.ADJACENT and (b, a) not in br.ADJACENT
+            and _pen(a, b)[0] > 0.0]
+    if left:
+        print("  !! unresolved non-adjacent overlaps:", left)
 
     # --- 3) Joint anchors from the skeleton -------------------------------
     def joint_pos(name, side):

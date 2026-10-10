@@ -23,6 +23,18 @@ var float DeathImpulseScale;
 // (0 = real skinned mesh). Affects corpses spawned after the change.
 var() globalconfig bool bBoxMannequins;
 
+// Live physics tuning (read natively through the script property list, so
+// console "set RagdollPkg.RagdollCarcass <Name> <Value>" applies to the next
+// corpse without a rebuild; persisted under [RagdollPkg.RagdollCarcass]).
+//   JointFrictionScale  multiplies every joint's friction torque (1 = defaults)
+//   JointLimitScale     multiplies every joint's cone/hinge range (1 = defaults)
+//   AngularDamping      per-body angular damping (1/s); lower = floppier
+//   DeathSpin           random angular velocity (rad/s) given to each body at death
+var() globalconfig float JointFrictionScale;
+var() globalconfig float JointLimitScale;
+var() globalconfig float AngularDamping;
+var() globalconfig float DeathSpin;
+
 native function BuildRagdoll();
 native function StepRagdoll(float DeltaSeconds);
 native function SyncRagdoll();
@@ -127,6 +139,10 @@ defaultproperties
 	SimSubSteps=4
 	DeathImpulseScale=1.0
 	bBoxMannequins=false
+	JointFrictionScale=1.0
+	JointLimitScale=1.0
+	AngularDamping=0.15
+	DeathSpin=3.0
 	bAlwaysTick=true
 	RemoteRole=ROLE_SimulatedProxy
 	DrawType=DT_Mesh

@@ -19,8 +19,12 @@ Notes for AI agents working in this repo.
     the playtest logs come from) and
     `C:\Users\kkragoth\dev\Unreal Tournament\Unreal Tournament\`. Deploy
     `RagdollPkg.dll` (and `.u` after `ucc make`) to BOTH `System\` folders.
-    Neither `RagdollPkg\` folder is a junction into this repo any more
+    Both installs' `RagdollPkg\` folders are junctions into THIS repo's
+    `RagdollPkg\` (recreated 2026-10-10 with `mklink /J`), so `ucc make` run
+    from either `System\` compiles the repo sources
     (`...\Ut99PubSrc` is the retired monorepo - do not edit or deploy from it).
+  - Non-interactive `ucc make`: pipe the header answer, e.g. in PowerShell
+    `"N`nN`n" | .\UCC.exe make` (answer N keeps the hand-maintained header).
   - `ucc make` binds native functions by the DLL export name
     (`intARagdollCarcassexec<Name>`). New native exec functions must be
     built/deployed in the DLL **before** running `ucc make`, or make fails with
@@ -33,6 +37,21 @@ Notes for AI agents working in this repo.
 - Playtest: `UnrealTournament.exe
   DM-Deck16][?game=Botpack.DeathMatchPlus?MinPlayers=8?mutator=RagdollPkg.RagdollMutator,RagdollPkg.RagdollTestMutator
   -log` from the retail `System\`. Logs land in `System\UnrealTournament.log`.
+
+## Physics tuning knobs (no rebuild)
+
+`RagdollCarcass` has globalconfig floats read natively by name
+(`RagdollFloatProp`, same property-walk as `bBoxMannequins`), so they can be
+tuned in the console and apply to the next corpse:
+`set RagdollPkg.RagdollCarcass JointFrictionScale 0.5` (joint friction,
+1 = defaults of 0.15-0.8 Nm), `JointLimitScale` (cone/hinge ranges),
+`AngularDamping` (per-body, default 0.15), `DeathSpin` (random rad/s per
+body at death, default 3.0). Persisted under `[RagdollPkg.RagdollCarcass]`
+in UnrealTournament.ini. The 2026-10-10 defaults replaced joint brakes of
+1.5-2.4 Nm (15-50% of the limbs' gravity torque, which froze limbs 20-35 deg
+from vertical) and ~doubled every joint range. Dataset body boxes are capped
+in height and checked for non-adjacent overlap in `build_rig_mixamo.py`
+(the spine box used to reach into the thigh boxes and jam the hips).
 
 ## Ragdoll real-mesh skinning (ON; runtime-toggleable)
 
