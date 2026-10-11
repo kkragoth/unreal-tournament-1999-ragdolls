@@ -380,6 +380,13 @@ def split_islands(S, verbose=True):
                     count_edge((pid, I), S.wedges[p0[0]][0], S.wedges[p1[0]][0])
     S.faces = new_faces
 
+    # Stats for callers (tools/gore_cuts.py): live rim edges per group.
+    S.stats = dict(moved=moved, seam=n_seam, planar=n_planar, fallback=n_fallback,
+                   rim={g: [e for e, c in edges.items() if c == 1] for g, edges in rim.items()})
+    if getattr(S, "no_caps", False):
+        S.splits += 1
+        return island
+
     # 3. Caps.
     n_caps = 0
     for group, edges in rim.items():

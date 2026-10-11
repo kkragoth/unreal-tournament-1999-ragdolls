@@ -22,10 +22,11 @@
 	     the face (fused regions such as the armpit) it is replaced by one
 	     copy per island with the foreign vertices duplicated and bound 100%
 	     to a bone of that island, as a closed-ish skirt.
-	  3. The on-plane edges of each island form a planar rim that is
-	     fan-capped from its centroid with the dark wound material (exact
-	     flat cross-section). Fallback skirt rims are fan-capped only close to
-	     their centroid. Because every material is PF_TwoSided the cap winding
+	  3. The on-plane edges of each island form a planar rim; each closed
+	     loop of a real cross-section is capped with a modelled template
+	     (torn meat, the wound atlas), thin accessory rims and fallback
+	     skirt rims with a centroid fan (the latter only close to their
+	     centroid). Because every material is PF_TwoSided the cap winding
 	     does not matter.
 
 	The algorithm is generic in the island partition, so a single routine
@@ -38,6 +39,8 @@
 #include "RagdollInternal.h"
 #include "UnRagdollMesh.h"
 #include "box3d/box3d.h"
+#include "RagdollCutSites.h"       // tools/gore_cuts.py: per-model cut sites
+#include "RagdollWoundTexture.h"   // tools/build_wound_texture.py: the cap atlas
 
 /*-----------------------------------------------------------------------------
 	Bone tree helpers.
@@ -122,9 +125,11 @@ FVector RagdollBoneCenter( const FRagdollState& S, INT Bone )
 	Wound texture.
 -----------------------------------------------------------------------------*/
 
-// A 16x16 palettised texture of dark-red noise. Built once in the transient
-// package and rooted so garbage collection never frees it; every corpse's cap
-// material references the same object.
+// The wound atlas (RagdollWoundTexture.h, painted offline by
+// tools/build_wound_texture.py): a 64x64 palettised texture in three bands
+// (V 0..127 meat, 128..191 clot, 192..255 bone) with mips. Built once in the
+// transient package and rooted so garbage collection never frees it; every
+// corpse's cap material references the same object.
 UTexture* RagdollCapTexture()
 {
 	guard(RagdollCapTexture);
@@ -140,45 +145,36 @@ UTexture* RagdollCapTexture()
 	Pal->Colors.Empty();
 	Pal->Colors.Add( 256 );
 	for( INT i=0; i<256; i++ )
-	{
-		// Index -> shade: mostly deep red, a few darker clots and brighter
-		// flecks so the cap reads as a wound instead of a flat disc.
-		// Dark: a cut should read as a shadowed cross-section, not a flag.
-		const INT  Tone  = i & 15;
-		const BYTE R     = (BYTE)( 30 + Tone * 4 );         // 30..90
-		const BYTE G     = (BYTE)( 2 + ( Tone >> 2 ) * 2 ); // 2..8
-		const BYTE B     = (BYTE)( 2 + ( Tone >> 3 ) * 2 ); // 2..4
-		Pal->Colors( i ) = FColor( R, G, B, 255 );
-	}
+		Pal->Colors( i ) = FColor( GRagdollWoundPalette[i][0], GRagdollWoundPalette[i][1], GRagdollWoundPalette[i][2], 255 );
 
 	Tex->Format    = TEXF_P8;
 	Tex->Palette   = Pal;
-	Tex->UBits     = 4;
-	Tex->VBits     = 4;
-	Tex->USize     = 16;
-	Tex->VSize     = 16;
-	Tex->UClamp    = 16;
-	Tex->VClamp    = 16;
-	Tex->MipZero   = FColor( 50, 4, 3, 255 );
+	Tex->UBits     = RAGDOLL_WOUND_BITS;
+	Tex->VBits     = RAGDOLL_WOUND_BITS;
+	Tex->USize     = RAGDOLL_WOUND_SIZE;
+	Tex->VSize     = RAGDOLL_WOUND_SIZE;
+	Tex->UClamp    = RAGDOLL_WOUND_SIZE;
+	Tex->VClamp    = RAGDOLL_WOUND_SIZE;
+	Tex->MipZero   = FColor( 60, 8, 8, 255 );
 	Tex->MaxColor  = FColor( 255, 255, 255, 255 );
 	Tex->PolyFlags = 0;
 	Tex->Mips.Empty();
-	new( Tex->Mips ) FMipmap( 4, 4 );
-	FMipmap& Mip = Tex->Mips( 0 );
-	for( INT i=0; i<Mip.DataArray.Num(); i++ )
+	for( INT m=0; m<RAGDOLL_WOUND_MIPS; m++ )
 	{
-		// Blotchy noise: coarse 2x2 cells with a jittered tone so the texture
-		// is not pure per-texel static at close range.
-		const INT x = i & 15, y = i >> 4;
-		const INT Cell = ( ( x >> 1 ) * 7 + ( y >> 1 ) * 13 ) & 15;
-		const INT Jit  = appRand() & 3;
-		Mip.DataArray( i ) = (BYTE)( ( Cell + Jit ) & 15 );
+		const INT Bits = RAGDOLL_WOUND_BITS - m;
+		if( Bits < 0 )
+			break;
+		new( Tex->Mips ) FMipmap( (BYTE)Bits, (BYTE)Bits );
+		FMipmap& Mip = Tex->Mips( m );
+		const INT N = Min( Mip.DataArray.Num(), ( 1 << Bits ) * ( 1 << Bits ) );
+		for( INT i=0; i<N; i++ )
+			Mip.DataArray( i ) = GRagdollWoundTexels[ GRagdollWoundMipOffset[m] + i ];
 	}
 
 	Pal->AddToRoot();
 	Tex->AddToRoot();
 	GCapTexture = Tex;
-	debugf( TEXT("RagdollPkg: created cap texture %s"), Tex->GetFullName() );
+	debugf( TEXT("RagdollPkg: created cap texture %s (%ix%i, %i mips)"), Tex->GetFullName(), Tex->USize, Tex->VSize, Tex->Mips.Num() );
 	return Tex;
 	unguard;
 }
@@ -281,9 +277,12 @@ static void RefreshMeshTables( URagdollMesh* Mesh, INT NumVerts )
 	   1 or 2 triangles. Faces no plane separates (fused regions: the armpit,
 	   the collar on some models) fall back to one copy per island with the
 	   foreign vertices duplicated and bound rigidly to the near side.
-	3. The on-plane edges of each island form a planar rim, fan-capped from
-	   its centroid with the wound material. Fallback rims are fan-capped only
-	   for edges close to their centroid so the fan cannot reach through skin.
+	3. The on-plane edges of each island form a planar rim, traced into loops;
+	   every closed loop of a real cross-section gets a modelled TEMPLATE cap
+	   (torn meat, see "Stump caps from templates" below), thin accessory
+	   rims and open chains a fan from their centroid. Fallback rims are
+	   fan-capped only for edges close to their centroid so the fan cannot
+	   reach through skin.
 -----------------------------------------------------------------------------*/
 
 #define RAGDOLL_CUT_EPS          0.02f   // UU: |d| below this is "on the plane"
@@ -294,6 +293,7 @@ static void RefreshMeshTables( URagdollMesh* Mesh, INT NumVerts )
 #define RAGDOLL_CUT_BOX_MARGIN   1.5f
 #define RAGDOLL_FALLBACK_CAP_SCALE  0.8f // non-planar rims: fan only edges this close to the centroid
 #define RAGDOLL_FALLBACK_CAP_MARGIN 1.5f
+#define RAGDOLL_CAP_MIN_RADIUS   1.5f    // UU: smaller planar rims (straps, antennae) get a fan, not a template
 
 static FVector BoneCenter( const FRagdollState& S, INT Bone )
 {
@@ -304,6 +304,8 @@ static FLOAT Dot3( const FVector& A, const FVector& B )
 {
 	return A.X * B.X + A.Y * B.Y + A.Z * B.Z;
 }
+
+static FLOAT ClampF( FLOAT V, FLOAT Lo, FLOAT Hi );   // defined with the wound painting
 
 static FVector SafeNormal( const FVector& V )
 {
@@ -393,6 +395,211 @@ static INT AddWedge( URagdollMesh* Mesh, INT iVertex, BYTE U, BYTE V )
 	return w;
 }
 
+/*-----------------------------------------------------------------------------
+	Cut sites, hit bookkeeping, hull trimming (docs/plans/gore-variation.md).
+-----------------------------------------------------------------------------*/
+
+const FRagdollCutSite* RagdollFindCutSite( const FRagdollState& S, INT Bone )
+{
+	if( !S.Dataset || !S.Dataset->DatasetName || Bone <= 0 || Bone >= RAGDOLL_BONE_COUNT )
+		return NULL;
+	for( INT i=0; i<GRagdollCutSiteCount; i++ )
+		if( appStrcmp( GRagdollCutSites[i].DatasetName, S.Dataset->DatasetName ) == 0 )
+		{
+			const FRagdollCutSite& Site = GRagdollCutSites[i].Sites[Bone];
+			return ( Site.TMin >= 0.0f && Site.TMax >= Site.TMin ) ? &Site : NULL;
+		}
+	return NULL;
+}
+
+FLOAT RagdollCutParam( const FRagdollState& S, INT Bone, const FVector& P )
+{
+	const FRagdollCutSite* Site = RagdollFindCutSite( S, Bone );
+	if( !Site )
+		return -1.0f;
+	const FVector Ax = Site->E - Site->A;
+	const FLOAT L2 = Dot3( Ax, Ax );
+	return L2 > 1e-6f ? Dot3( P - Site->A, Ax ) / L2 : -1.0f;
+}
+
+// World point (metres) -> bind-space position (UU, DrawScale=1) on body 'Bone':
+// the body frame IS the bind frame (bodies are created at the bind centre
+// with identity rotation), so the local point only needs the scale undone.
+static FVector RagdollWorldToBind( const FRagdollState& S, INT Bone, const b3Vec3& Wp )
+{
+	const b3Vec3 L = b3Body_GetLocalPoint( S.Bodies[Bone], Wp );
+	const FLOAT K = RAGDOLL_M2U / Max( S.DrawScale, 0.01f );
+	return RagdollBoneCenter( S, Bone ) + FVector( L.x * K, L.y * K, L.z * K );
+}
+
+void RagdollRecordHit( FRagdollState& S, INT Bone, const b3Vec3& Wp )
+{
+	if( Bone < 0 || Bone >= RAGDOLL_BONE_COUNT || !S.Alive[Bone] || !b3Body_IsValid( S.Bodies[Bone] ) )
+		return;
+	const FLOAT t = RagdollCutParam( S, Bone, RagdollWorldToBind( S, Bone, Wp ) );
+	if( t >= -0.5f )
+		S.HitT[Bone] = t;
+}
+
+// Choose where joint 'c' is cut: inside the site's clean range, pulled toward
+// the last hit on the body by CutVariation (0 = always TMin, the old
+// joint-level cut), plus a little jitter. Also rolls the bone stub. Returns
+// false without a site (the caller fits the heat-seam plane instead).
+static UBOOL RagdollPickCut( FRagdollState& S, INT c, FRagdollCutPlane& Pl )
+{
+	const FRagdollCutSite* Site = RagdollFindCutSite( S, c );
+	if( !Site )
+		return 0;
+	const FLOAT Var = ClampF( S.CutVariation, 0.0f, 1.0f );
+	FLOAT Target;
+	if( S.HitT[c] >= -0.5f )
+		Target = ClampF( S.HitT[c], Site->TMin, Site->TMax );
+	else
+		Target = Site->TMin + appFrand() * ( Site->TMax - Site->TMin );
+	FLOAT t = Site->TMin + ( Target - Site->TMin ) * Var;
+	t += ( appFrand() * 2.0f - 1.0f ) * 0.08f * Var;
+	// Snap to the sweep grid the site was validated on (0.05 steps).
+	t = appRound( t / 0.05f ) * 0.05f;
+	t = ClampF( t, Site->TMin, Site->TMax );
+	S.CutT[c] = t;
+	const FVector Ax = Site->E - Site->A;
+	Pl.A = Site->A + Ax * t;
+	Pl.N = SafeNormal( Ax );
+	Pl.W = Site->Band;
+	Pl.R = Site->Radius;
+	Pl.bValid = 1;
+	// Bone stub: the stump keeps the broken shaft with BoneStubChance, else
+	// the limb carries it away. StubLen is the scale of the template's bone
+	// along its axis (1 = the shaft template's length, ~the rim radius).
+	S.StubOnParent[c] = ( appFrand() < ClampF( S.BoneStubChance, 0.0f, 1.0f ) );
+	S.StubLen[c] = ( 0.8f + appFrand() * 0.6f ) * ClampF( S.BoneStubLength, 0.0f, 3.0f );
+	debugf( TEXT("RagdollPkg: cut site joint=%i t=%.2f (hit=%.2f range %.2f..%.2f) A=(%.1f %.1f %.1f) N=(%.2f %.2f %.2f) stub=%s x%.2f"),
+		c, t, S.HitT[c], Site->TMin, Site->TMax, Pl.A.X, Pl.A.Y, Pl.A.Z, Pl.N.X, Pl.N.Y, Pl.N.Z, !S.bBoneStubs ? TEXT("none") : S.StubOnParent[c] ? TEXT("stump") : TEXT("limb"), S.StubLen[c] );
+	return 1;
+}
+
+void RagdollRecordHull( FRagdollState& S, INT Bone, b3ShapeId Shape, const FVector& C, const FVector& H, FLOAT Density )
+{
+	if( Bone < 0 || Bone >= RAGDOLL_BONE_COUNT || S.NumHulls[Bone] >= RAGDOLL_MAX_HULLS )
+		return;
+	FRagdollHull& Hl = S.Hulls[Bone][ S.NumHulls[Bone]++ ];
+	Hl.Shape   = Shape;
+	Hl.C       = C;
+	Hl.H       = H;
+	Hl.Density = Density;
+}
+
+static b3ShapeId RagdollCreateHullBox( FRagdollState& S, INT Bone, const FVector& C, const FVector& H, FLOAT Density )
+{
+	const FLOAT K = S.DrawScale * RAGDOLL_U2M;
+	b3ShapeDef Sd = b3DefaultShapeDef();
+	Sd.density = Density;
+	Sd.baseMaterial.friction    = 0.6f;
+	Sd.baseMaterial.restitution = 0.05f;
+	Sd.filter.categoryBits      = RAGDOLL_BODY_CATEGORY;
+	b3BoxHull Hull = b3MakeOffsetBoxHull( H.X * K, H.Y * K, H.Z * K, b3Vec3{ C.X * K, C.Y * K, C.Z * K } );
+	return b3CreateHullShape( S.Bodies[Bone], &Sd, &Hull.base );
+}
+
+// The hulls are axis-aligned boxes in bind space and the site axes are close
+// to a bind axis (limbs hang vertically), so the clip is done along the box
+// axis the plane normal is most aligned with, at the plane's crossing of the
+// box centre line. A hull entirely on the proximal side is destroyed, a
+// straddling one shrunk (b3Shape_SetHull), the proximal remainder of the
+// main box becomes a hull on the parent body (the stump keeps collision).
+void RagdollTrimHullsForCut( FRagdollState& S, INT c )
+{
+	guard(RagdollTrimHullsForCut);
+	if( c <= 0 || c >= RAGDOLL_BONE_COUNT || !S.Alive[c] || !S.Cut[c] || S.CutT[c] < 0.12f || !S.JointPlanes[c].bValid )
+		return;
+	if( !b3Body_IsValid( S.Bodies[c] ) )
+		return;
+	const FRagdollCutPlane& Pl = S.JointPlanes[c];
+	const FVector Cc = RagdollBoneCenter( S, c );
+	const FVector Al = Pl.A - Cc;   // plane point relative to the body origin
+	const FLOAT Nk[3] = { Pl.N.X, Pl.N.Y, Pl.N.Z };
+	INT Axis = 0;
+	for( INT k=1; k<3; k++ )
+		if( Abs( Nk[k] ) > Abs( Nk[Axis] ) )
+			Axis = k;
+	if( Abs( Nk[Axis] ) < 0.7f )
+	{
+		debugf( TEXT("RagdollPkg: hull trim body=%i skipped: plane oblique (%.2f %.2f %.2f)"), c, Pl.N.X, Pl.N.Y, Pl.N.Z );
+		return;
+	}
+	const INT Parent = GRagdollBoneParent[c];
+	const FLOAT K = S.DrawScale * RAGDOLL_U2M;
+	INT Kept = 0, Shrunk = 0, Dropped = 0, Stump = 0;
+	for( INT h=0; h<S.NumHulls[c]; h++ )
+	{
+		FRagdollHull& Hl = S.Hulls[c][h];
+		if( !b3Shape_IsValid( Hl.Shape ) )
+			continue;
+		FLOAT Cv[3] = { Hl.C.X, Hl.C.Y, Hl.C.Z }, Hv[3] = { Hl.H.X, Hl.H.Y, Hl.H.Z };
+		// Centre line p = C + s e_k crosses the plane at s = N.(Al - C) / N_k.
+		const FLOAT s = Dot3( Pl.N, Al - Hl.C ) / Nk[Axis];
+		const FLOAT CutAt = Cv[Axis] + s;
+		const FLOAT Lo = Cv[Axis] - Hv[Axis], Hi = Cv[Axis] + Hv[Axis];
+		// Distal (kept) side: N.(p - A) > 0.
+		FLOAT KeepLo, KeepHi, DropLo, DropHi;
+		if( Nk[Axis] > 0.0f ) { KeepLo = Max( Lo, CutAt ); KeepHi = Hi; DropLo = Lo; DropHi = Min( Hi, CutAt ); }
+		else                  { KeepLo = Lo; KeepHi = Min( Hi, CutAt ); DropLo = Max( Lo, CutAt ); DropHi = Hi; }
+		if( KeepHi - KeepLo >= ( Hi - Lo ) - 0.25f )
+		{
+			Kept++;
+			continue;   // whole hull is on the severed part
+		}
+		if( h == 0 && DropHi - DropLo > 0.5f && Parent >= 0 && S.Alive[Parent] && b3Body_IsValid( S.Bodies[Parent] ) )
+		{
+			// Proximal remainder of the main box -> stump hull on the parent.
+			FLOAT Sc[3] = { Cv[0], Cv[1], Cv[2] }, Sh[3] = { Hv[0], Hv[1], Hv[2] };
+			Sc[Axis] = 0.5f * ( DropLo + DropHi );
+			Sh[Axis] = 0.5f * ( DropHi - DropLo );
+			const FVector Cp = RagdollBoneCenter( S, Parent );
+			const FVector StumpC = Cc + FVector( Sc[0], Sc[1], Sc[2] ) - Cp;
+			const FVector StumpH( Sh[0], Sh[1], Sh[2] );
+			b3ShapeId Sid = RagdollCreateHullBox( S, Parent, StumpC, StumpH, Hl.Density );
+			if( !B3_IS_NULL( Sid ) )
+			{
+				RagdollRecordHull( S, Parent, Sid, StumpC, StumpH, Hl.Density );
+				Stump++;
+			}
+		}
+		if( KeepHi - KeepLo < 0.5f )
+		{
+			b3DestroyShape( Hl.Shape, false );
+			Hl.Shape = b3_nullShapeId;
+			Dropped++;
+			continue;
+		}
+		Cv[Axis] = 0.5f * ( KeepLo + KeepHi );
+		Hv[Axis] = 0.5f * ( KeepHi - KeepLo );
+		Hl.C = FVector( Cv[0], Cv[1], Cv[2] );
+		Hl.H = FVector( Hv[0], Hv[1], Hv[2] );
+		b3BoxHull Hull = b3MakeOffsetBoxHull( Hl.H.X * K, Hl.H.Y * K, Hl.H.Z * K, b3Vec3{ Hl.C.X * K, Hl.C.Y * K, Hl.C.Z * K } );
+		b3Shape_SetHull( Hl.Shape, &Hull.base );
+		Shrunk++;
+	}
+	if( Shrunk + Dropped > 0 )
+	{
+		// A body with no shape left gets a small slab at the plane so it keeps
+		// a mass and collides with the floor.
+		if( b3Body_GetShapeCount( S.Bodies[c] ) == 0 )
+		{
+			FVector Cv = Al, Hv( 1.0f, 1.0f, 1.0f );
+			b3ShapeId Sid = RagdollCreateHullBox( S, c, Cv, Hv, S.Hulls[c][0].Density );
+			if( !B3_IS_NULL( Sid ) )
+				RagdollRecordHull( S, c, Sid, Cv, Hv, S.Hulls[c][0].Density );
+		}
+		b3Body_ApplyMassFromShapes( S.Bodies[c] );
+		if( Stump > 0 )
+			b3Body_ApplyMassFromShapes( S.Bodies[Parent] );
+	}
+	debugf( TEXT("RagdollPkg: hull trim body=%i t=%.2f axis=%c kept=%i shrunk=%i dropped=%i stump=%i mass=%.1fkg"),
+		c, S.CutT[c], "XYZ"[Axis], Kept, Shrunk, Dropped, Stump, b3Body_GetMass( S.Bodies[c] ) );
+	unguard;
+}
+
 // Fit the cut plane of joint 'c' (child body) to the current heat-weight seam
 // ring between c's island and its parent's island. See the findings doc: the
 // skeleton anchors are the wrong place (the spine-neck anchor sits at the back
@@ -476,6 +683,242 @@ static FRagdollCutPlane FitJointPlane( const FRagdollState& S, INT c, const INT*
 	unguard;
 }
 
+/*-----------------------------------------------------------------------------
+	Stump caps from templates (RagdollCapTemplates.h, tools/cap_templates.py;
+	mirror of fit_template in tools/gore_cuts.py).
+
+	A template is a small mesh in unit space whose first RAGDOLL_CAP_RIM
+	vertices are a circle of radius 1 at z = 0 (+z out of the severed part).
+	The real rim loop is sorted by angle, the template is spun by a random
+	angle, its rim ring is placed ON the loop polygon (the loop's polar radius
+	at each ring angle), interior vertices follow that radial correction
+	weighted by their own radius, everything is scaled by the loop's mean
+	radius (bone-only vertices also by the stub scale along z), and the loop
+	is stitched to the ring with one thin strip. No per-vertex jitter: the
+	user found the procedural meaty cap "too triangulated".
+-----------------------------------------------------------------------------*/
+
+#include "RagdollCapTemplates.h"
+
+#define UV_CLOT 170
+
+// Live rim edges (A[i], B[i]) -> ordered loops. Output is flat: loop l is
+// Verts[Start[l] .. Start[l]+Len[l]), Closed[l] when it returned to its start.
+static void TraceRimLoops( const TArray<INT>& A, const TArray<INT>& B, TArray<INT>& Verts, TArray<INT>& Start, TArray<INT>& Len, TArray<INT>& Closed )
+{
+	const INT NE = A.Num();
+	TArray<INT> Used;
+	Used.AddZeroed( NE );
+	INT Remaining = NE;
+	while( Remaining > 0 )
+	{
+		// Start at a vertex of odd degree when there is one (open chain).
+		INT First = -1;
+		for( INT e=0; e<NE && First<0; e++ )
+			if( !Used( e ) )
+				First = e;
+		INT StartV = A( First );
+		for( INT e=0; e<NE; e++ )
+		{
+			if( Used( e ) )
+				continue;
+			UBOOL Found = 0;
+			for( INT q=0; q<2 && !Found; q++ )
+			{
+				const INT v = q ? B( e ) : A( e );
+				INT Deg = 0;
+				for( INT f=0; f<NE; f++ )
+					if( !Used( f ) && ( A( f ) == v || B( f ) == v ) )
+						Deg++;
+				if( Deg & 1 )
+				{
+					StartV = v;
+					Found = 1;
+				}
+			}
+			if( Found )
+				break;
+		}
+		const INT S0 = Verts.Num();
+		Verts.AddItem( StartV );
+		INT Cur = StartV;
+		UBOOL bClosed = 0;
+		for( ;; )
+		{
+			INT Next = -1;
+			for( INT e=0; e<NE; e++ )
+			{
+				if( Used( e ) )
+					continue;
+				if( A( e ) == Cur )      Next = B( e );
+				else if( B( e ) == Cur ) Next = A( e );
+				else continue;
+				Used( e ) = 1;
+				Remaining--;
+				break;
+			}
+			if( Next < 0 )
+				break;
+			if( Next == StartV )
+			{
+				bClosed = 1;
+				break;
+			}
+			Verts.AddItem( Next );
+			Cur = Next;
+		}
+		Start.AddItem( S0 );
+		Len.AddItem( Verts.Num() - S0 );
+		Closed.AddItem( bClosed );
+	}
+}
+
+static void CapAddFace( URagdollMesh* Mesh, INT Mat, INT v0, FLOAT u0, INT V0, INT v1, FLOAT u1, INT V1, INT v2, FLOAT u2, INT V2 )
+{
+	if( v0 == v1 || v1 == v2 || v0 == v2 )
+		return;
+	const INT fi = Mesh->Faces.Add();
+	FMeshFace& F = Mesh->Faces( fi );
+	F.MaterialIndex = (_WORD)Mat;
+	F.iWedge[0] = (_WORD)AddWedge( Mesh, v0, (BYTE)Clamp( appRound( u0 ), 0, 255 ), (BYTE)Clamp( V0, 0, 255 ) );
+	F.iWedge[1] = (_WORD)AddWedge( Mesh, v1, (BYTE)Clamp( appRound( u1 ), 0, 255 ), (BYTE)Clamp( V1, 0, 255 ) );
+	F.iWedge[2] = (_WORD)AddWedge( Mesh, v2, (BYTE)Clamp( appRound( u2 ), 0, 255 ), (BYTE)Clamp( V2, 0, 255 ) );
+}
+
+// Stitch two rings sorted by angle (merge-walk); u = angle around the rim.
+static void CapBridge( const TArray<INT>& RA, const TArray<FLOAT>& AA, const TArray<INT>& RB, const TArray<FLOAT>& AB, URagdollMesh* Mesh, INT Mat, INT VA, INT VB )
+{
+	const INT na = RA.Num(), nb = RB.Num();
+	if( na < 2 || nb < 2 )
+		return;
+	INT i = 0, j = 0;
+	const FLOAT K = 255.0f / ( 2.0f * PI );
+	for( INT step=0; step<na+nb; step++ )
+	{
+		const FLOAT a0 = AA( i % na ), a1r = AA( ( i + 1 ) % na );
+		const FLOAT b0 = AB( j % nb ), b1r = AB( ( j + 1 ) % nb );
+		const FLOAT a1 = a1r > a0 ? a1r : a1r + 2.0f * PI;
+		const FLOAT b1 = b1r > b0 ? b1r : b1r + 2.0f * PI;
+		if( ( a1 <= b1 && i < na ) || j >= nb )
+		{
+			CapAddFace( Mesh, Mat, RA( i % na ), a0 * K, VA, RA( ( i + 1 ) % na ), a1 * K, VA, RB( j % nb ), b0 * K, VB );
+			i++;
+		}
+		else
+		{
+			CapAddFace( Mesh, Mat, RA( i % na ), a0 * K, VA, RB( ( j + 1 ) % nb ), b1 * K, VB, RB( j % nb ), b0 * K, VB );
+			j++;
+		}
+	}
+}
+
+// Polar radius of the sorted rim loop at angle Theta (linear between neighbours).
+static FLOAT RimRadiusAt( const TArray<FLOAT>& Ang, const TArray<FLOAT>& Rad, FLOAT Theta )
+{
+	const INT n = Ang.Num();
+	while( Theta < 0.0f ) Theta += 2.0f * PI;
+	while( Theta >= 2.0f * PI ) Theta -= 2.0f * PI;
+	for( INT i=0; i<n; i++ )
+	{
+		FLOAT a0 = Ang( i ), a1 = Ang( ( i + 1 ) % n );
+		if( a1 < a0 ) a1 += 2.0f * PI;
+		const FLOAT tt = ( Theta >= a0 ) ? Theta : Theta + 2.0f * PI;
+		if( tt >= a0 && tt <= a1 )
+		{
+			const FLOAT f = ( a1 > a0 ) ? ( tt - a0 ) / ( a1 - a0 ) : 0.0f;
+			return Rad( i ) + ( Rad( ( i + 1 ) % n ) - Rad( i ) ) * f;
+		}
+	}
+	return Rad( 0 );
+}
+
+static INT BuildTemplateCap( FRagdollState& S, URagdollMesh* Mesh, const INT* LoopIn, INT N, const FVector& Nout, INT Bone, INT Mat, INT Variant, FLOAT StubScale )
+{
+	guard(BuildTemplateCap);
+	if( Variant < 0 || Variant >= RAGDOLL_CAP_VARIANTS || N < 3 )
+		return 0;
+	const FRagdollCapTemplate& T = GRagdollCapTemplates[Variant];
+	const INT F0 = Mesh->Faces.Num();
+
+	// Frame: centroid, mean radius, in-plane basis.
+	const FVector Nn = SafeNormal( Nout );
+	FVector C( 0, 0, 0 );
+	for( INT i=0; i<N; i++ )
+		C += S.BindPos( LoopIn[i] );
+	C /= (FLOAT)N;
+	FLOAT R = 0.0f;
+	for( INT i=0; i<N; i++ )
+		R += FDist( S.BindPos( LoopIn[i] ), C );
+	R = Max( R / N, 1.0f );
+	const FVector Up = ( Abs( Nn.Z ) < 0.9f ) ? FVector( 0, 0, 1 ) : FVector( 1, 0, 0 );
+	const FVector X = SafeNormal( Up - Nn * Dot3( Up, Nn ) );
+	const FVector Y = Nn ^ X;
+
+	// Loop sorted by angle, with each vertex's polar radius.
+	TArray<INT>   Loop;
+	TArray<FLOAT> Ang, Rad;
+	for( INT i=0; i<N; i++ )
+	{
+		const FVector Rel = S.BindPos( LoopIn[i] ) - C;
+		FLOAT a = appAtan2( Dot3( Rel, Y ), Dot3( Rel, X ) );
+		if( a < 0.0f ) a += 2.0f * PI;
+		INT k = Loop.Num();
+		Loop.AddItem( LoopIn[i] );
+		Ang.AddItem( a );
+		Rad.AddItem( appSqrt( Max( Dot3( Rel, Rel ) - Square( Dot3( Rel, Nn ) ), 0.0f ) ) );
+		for( ; k>0 && Ang( k-1 ) > a; k-- )
+		{
+			Exchange( Ang( k ), Ang( k-1 ) );
+			Exchange( Loop( k ), Loop( k-1 ) );
+			Exchange( Rad( k ), Rad( k-1 ) );
+		}
+	}
+
+	// Template vertices.
+	const FLOAT Phi = appFrand() * 2.0f * PI;
+	const FLOAT cp = appCos( Phi ), sp = appSin( Phi );
+	TArray<INT>   Ids;
+	TArray<INT>   Ring;
+	TArray<FLOAT> RingAng;
+	for( INT v=0; v<T.NumVerts; v++ )
+	{
+		const FRagdollCapVert& V = T.Verts[v];
+		const FLOAT cx = V.X * cp - V.Y * sp, cy = V.X * sp + V.Y * cp;
+		const FLOAT r  = appSqrt( cx * cx + cy * cy );
+		FLOAT th = appAtan2( cy, cx );
+		if( th < 0.0f ) th += 2.0f * PI;
+		const FLOAT rr = RimRadiusAt( Ang, Rad, th ) / R;
+		const FLOAT k  = 1.0f + ( rr - 1.0f ) * Min( r, 1.0f );
+		const FLOAT zz = V.Z * ( V.bBone ? StubScale : 1.0f );
+		const FVector P = C + X * ( cx * k * R ) + Y * ( cy * k * R ) + Nn * ( zz * R );
+		const INT id = AddBoundVertex( S, Mesh, P, Bone );
+		Ids.AddItem( id );
+		if( v < RAGDOLL_CAP_RIM )
+		{
+			Ring.AddItem( id );
+			RingAng.AddItem( th );
+		}
+	}
+	for( INT f=0; f<T.NumFaces; f++ )
+	{
+		const FRagdollCapFace& F = T.Faces[f];
+		const FRagdollCapVert& V0 = T.Verts[F.V[0]];
+		const FRagdollCapVert& V1 = T.Verts[F.V[1]];
+		const FRagdollCapVert& V2 = T.Verts[F.V[2]];
+		CapAddFace( Mesh, Mat, Ids( F.V[0] ), V0.U, V0.V, Ids( F.V[1] ), V1.U, V1.V, Ids( F.V[2] ), V2.U, V2.V );
+	}
+	// The ring is sorted by angle after the spin.
+	for( INT i=1; i<Ring.Num(); i++ )
+		for( INT k=i; k>0 && RingAng( k-1 ) > RingAng( k ); k-- )
+		{
+			Exchange( RingAng( k ), RingAng( k-1 ) );
+			Exchange( Ring( k ), Ring( k-1 ) );
+		}
+	CapBridge( Loop, Ang, Ring, RingAng, Mesh, Mat, UV_CLOT, UV_CLOT );
+	return Mesh->Faces.Num() - F0;
+	unguard;
+}
+
 // Rim/cap group ids: island * 256 + sub, sub = joint child (1..13),
 // 32 + fragment plane index, or 64 + source island for fallback rims.
 #define CUT_GROUP_JOINT( I, c )  ( (I) * 256 + (c) )
@@ -497,15 +940,20 @@ void RagdollSplitIslands( FRagdollState& S )
 	const INT NumV0 = Mesh->FrameVerts;
 	const INT NumF0 = Mesh->Faces.Num();
 	const INT NumW0 = Mesh->Wedges.Num();
+	if( S.NumOrigVerts <= 0 )
+		S.NumOrigVerts = NumV0;   // first split: everything so far is original skin
 
 	// bPlanarCuts off (default): no planes at all - dominant-bone islands,
 	// every seam face takes the duplicated-skirt path, full centroid fans.
 	const UBOOL bPlanar = S.bPlanarCuts;
 
-	// Joint planes of the cut joints, fitted once when the cut first appears.
+	// Joint planes of the cut joints, chosen once when the cut first appears:
+	// the authored site (RagdollCutSites.h) placed by the last hit, else the
+	// heat-seam fit (neck/head on most models, box mannequins).
 	for( INT c=1; bPlanar && c<S.NumBodies && c<RAGDOLL_BONE_COUNT; c++ )
 		if( S.Alive[c] && S.Cut[c] && !S.JointPlanes[c].bValid )
-			S.JointPlanes[c] = FitJointPlane( S, c, Island );
+			if( !RagdollPickCut( S, c, S.JointPlanes[c] ) )
+				S.JointPlanes[c] = FitJointPlane( S, c, Island );
 
 	// 1. Vertex islands: dominant bone, refined by the joint planes, then
 	//    single-island rebinding.
@@ -522,7 +970,13 @@ void RagdollSplitIslands( FRagdollState& S )
 		INT I = ( b >= 0 && b < RAGDOLL_MAX_BONES ) ? Island[b] : -1;
 		INT Pf = -1;
 		const FVector& P = S.BindPos( v );
-		for( INT c=1; bPlanar && c<S.NumBodies && c<RAGDOLL_BONE_COUNT; c++ )
+		// Only the ORIGINAL skin vertices are placed by the planes. Vertices
+		// made by earlier splits (clip points, skirt copies and above all the
+		// cap geometry, whose bone shaft / lip pokes across its own plane)
+		// stay with the bone they were bound to; re-placing them re-split the
+		// old caps on every later cut (375k verts after ten cuts, 2026-10-11).
+		const UBOOL bOriginal = ( v < S.NumOrigVerts );
+		for( INT c=1; bPlanar && bOriginal && c<S.NumBodies && c<RAGDOLL_BONE_COUNT; c++ )
 		{
 			if( !S.Alive[c] || !S.Cut[c] || !S.JointPlanes[c].bValid )
 				continue;
@@ -854,18 +1308,30 @@ void RagdollSplitIslands( FRagdollState& S )
 	for( INT i=0; i<NewFaces.Num(); i++ )
 		Mesh->Faces.AddItem( NewFaces( i ) );
 
-	// 3. Caps: fan every rim edge from its group's centroid.
-	TMap<INT,INT> ApexVert;   // group -> apex vertex
-	INT NumCaps = 0;
+	// 3. Caps. Live rim edges (count 1) are gathered per group; a planar
+	//    group's edges are traced into loops and every closed loop of 6+
+	//    vertices gets a TEMPLATE cap (torn meat + bone, see BuildTemplateCap),
+	//    smaller loops and open chains a fan from their own centroid.
+	//    Fallback (skirt) rims keep the near-centroid fan.
+	INT NumCaps = 0, NumModelled = 0;
 	const INT CapMat = S.CapMaterial >= 0 ? S.CapMaterial : 0;
+	TArray<INT> EG, EA, EB;
 	for( TMap<QWORD,INT>::TIterator It( EdgeCount ); It; ++It )
 	{
 		if( It.Value() != 1 )
 			continue;
 		const QWORD Key = It.Key();
-		const INT G   = (INT)( Key >> 32 );
-		INT a = (INT)( ( Key >> 16 ) & 0xFFFF );
-		INT b = (INT)( Key & 0xFFFF );
+		EG.AddItem( (INT)( Key >> 32 ) );
+		EA.AddItem( (INT)( ( Key >> 16 ) & 0xFFFF ) );
+		EB.AddItem( (INT)( Key & 0xFFFF ) );
+	}
+	TMap<INT,INT> GroupDone;
+	for( INT e0=0; e0<EG.Num(); e0++ )
+	{
+		const INT G = EG( e0 );
+		if( GroupDone.Find( G ) )
+			continue;
+		GroupDone.Set( G, 1 );
 		const INT I   = G / 256;
 		const INT Sub = G % 256;
 		const UBOOL bFallback = ( Sub >= 64 );
@@ -876,56 +1342,166 @@ void RagdollSplitIslands( FRagdollState& S )
 			continue;
 		const FVector Apex = *Sum / (FLOAT)*N;
 
-		if( bFallback )
+		// The bone the cap rides: the bone adjacent to a joint cut, else the
+		// island's nearest bone.
+		INT Bone = -1;
+		if( Sub > 0 && Sub < RAGDOLL_BONE_COUNT )
 		{
-			// Rim keyed by the ORIGINAL foreign vertices: fan their copies in I,
-			// and only near the centroid so the fan stays inside the fused zone.
-			INT* Da = DupMap.Find( a * 64 + I );
-			INT* Db = DupMap.Find( b * 64 + I );
-			if( !Da || !Db )
+			if( I == Sub )
+				Bone = Sub;
+			else if( Island[ GRagdollBoneParent[Sub] ] == I )
+				Bone = GRagdollBoneParent[Sub];
+		}
+		if( Bone < 0 )
+			Bone = NearestBoneInIsland( S, Island, I, Apex );
+		if( Bone < 0 )
+			Bone = BONE_Pelvis;
+
+		// This group's edges, in island-I vertex ids.
+		TArray<INT> A, B;
+		for( INT e=e0; e<EG.Num(); e++ )
+		{
+			if( EG( e ) != G )
 				continue;
-			const FLOAT Lim = RAGDOLL_FALLBACK_CAP_SCALE * BoneRadius( S, I ) + RAGDOLL_FALLBACK_CAP_MARGIN;
-			if( bPlanar && ( FDistSquared( S.BindPos( *Da ), Apex ) > Lim * Lim || FDistSquared( S.BindPos( *Db ), Apex ) > Lim * Lim ) )
-				continue;   // (full fans when planar cuts are off, as before)
-			a = *Da;
-			b = *Db;
+			INT a = EA( e ), b = EB( e );
+			if( bFallback )
+			{
+				INT* Da = DupMap.Find( a * 64 + I );
+				INT* Db = DupMap.Find( b * 64 + I );
+				if( !Da || !Db )
+					continue;
+				const FLOAT Lim = RAGDOLL_FALLBACK_CAP_SCALE * BoneRadius( S, I ) + RAGDOLL_FALLBACK_CAP_MARGIN;
+				if( bPlanar && ( FDistSquared( S.BindPos( *Da ), Apex ) > Lim * Lim || FDistSquared( S.BindPos( *Db ), Apex ) > Lim * Lim ) )
+					continue;
+				a = *Da;
+				b = *Db;
+			}
+			A.AddItem( a );
+			B.AddItem( b );
+		}
+		if( A.Num() == 0 )
+			continue;
+
+		if( bFallback || !S.bModelledCaps )
+		{
+			// Fan from the group centroid (the pre-2026-10-11 cap).
+			const INT ApexV = AddBoundVertex( S, Mesh, Apex, Bone );
+			for( INT e=0; e<A.Num(); e++ )
+			{
+				INT fi = Mesh->Faces.Add();
+				FMeshFace& CF = Mesh->Faces( fi );
+				CF.MaterialIndex = (_WORD)CapMat;
+				CF.iWedge[0] = (_WORD)AddWedge( Mesh, A( e ),   8, 100 );
+				CF.iWedge[1] = (_WORD)AddWedge( Mesh, B( e ), 248, 100 );
+				CF.iWedge[2] = (_WORD)AddWedge( Mesh, ApexV, 128,  20 );
+				NumCaps++;
+			}
+			continue;
 		}
 
-		INT* Found = ApexVert.Find( G );
-		INT ApexV;
-		if( Found )
-			ApexV = *Found;
-		else
+		// Outward direction of this island's cut face (+z of the template, into
+		// the gap). A joint plane's N points DISTALLY (site axis / heat fit), so
+		// the severed piece (island == the cut bone) caps toward -N and the
+		// stump toward +N. The old test, "away from the island's root bone's
+		// box centre", put the severed piece's cap INSIDE it whenever the cut
+		// lay distal of the bone's box centre (the outer half of every site:
+		// forearm t > ~0.5, thigh t > ~0.5...), the dish extruded into the
+		// limb and the rim left open; found in the 2026-10-11 review. Fragment
+		// planes have no parent/child and keep the centre test.
+		const FRagdollCutPlane* Pl = ( Sub < 32 ) ? &S.JointPlanes[Sub] : &S.FragPlanes[Sub - 32];
+		FVector Nout = Pl->N;
+		if( Sub < 32 )
 		{
-			INT Bone = -1;
-			if( Sub > 0 && Sub < RAGDOLL_BONE_COUNT )
-			{
-				// Joint cut: the cap rides the bone adjacent to the cut.
-				if( I == Sub )
-					Bone = Sub;
-				else if( Island[ GRagdollBoneParent[Sub] ] == I )
-					Bone = GRagdollBoneParent[Sub];
-			}
-			if( Bone < 0 )
-				Bone = NearestBoneInIsland( S, Island, I, Apex );
-			if( Bone < 0 )
-				Bone = BONE_Pelvis;
-			ApexV = AddBoundVertex( S, Mesh, Apex, Bone );
-			ApexVert.Set( G, ApexV );
+			if( I == Sub )
+				Nout = -Nout;
 		}
-		INT fi = Mesh->Faces.Add();
-		FMeshFace& CF = Mesh->Faces( fi );
-		CF.MaterialIndex = (_WORD)CapMat;
-		CF.iWedge[0] = (_WORD)AddWedge( Mesh, a,     8, 248 );
-		CF.iWedge[1] = (_WORD)AddWedge( Mesh, b,   248, 248 );
-		CF.iWedge[2] = (_WORD)AddWedge( Mesh, ApexV, 128,  8 );
-		NumCaps++;
+		else if( Dot3( BoneCenter( S, I ) - Pl->A, Pl->N ) > 0.0f )
+			Nout = -Nout;
+		// Cap template for this side of the cut: a joint-level cut (site
+		// t < 0.12 or the heat-seam fit) disarticulates - the limb keeps the
+		// bone head, the stump an empty socket; a mid-bone cut shows the
+		// broken shaft on one side and a flush cross-section on the other.
+		// Fragment planes get meat only.
+		INT   Variant   = CAP_SOCKET;
+		FLOAT StubScale = 1.0f;
+		// User (2026-10-11): "bones should stick out of the more important
+		// part" - the body keeps the protruding bone, the severed piece shows
+		// a flush cross-section. StubOnParent (BoneStubChance, default 1) can
+		// still swap the two; a joint-level cut gives the body a shorter
+		// shaft and the limb the bone head.
+		if( !S.bBoneStubs )
+		{
+			// bBoneStubs off (default): no bone geometry at all, both sides of
+			// every cut get the torn-meat socket cap.
+			Variant = CAP_SOCKET;
+		}
+		else if( Sub > 0 && Sub < RAGDOLL_BONE_COUNT )
+		{
+			const UBOOL bChildSide = ( I == Sub );
+			const UBOOL bBoneHere  = ( bChildSide != S.StubOnParent[Sub] );
+			StubScale = Max( S.StubLen[Sub], 0.3f );
+			if( S.CutT[Sub] < 0.12f )
+			{
+				Variant = bBoneHere ? CAP_SHAFT : ( bChildSide ? CAP_HEAD : CAP_SOCKET );
+				if( bBoneHere )
+					StubScale *= 0.7f;
+			}
+			else
+				Variant = bBoneHere ? CAP_SHAFT : CAP_FLUSH;
+		}
+
+		TArray<INT> LoopVerts, LoopStart, LoopLen, LoopClosed;
+		TraceRimLoops( A, B, LoopVerts, LoopStart, LoopLen, LoopClosed );
+		for( INT l=0; l<LoopStart.Num(); l++ )
+		{
+			const INT* Lp = &LoopVerts( LoopStart( l ) );
+			const INT  Ln = LoopLen( l );
+			// Mean rim radius: a closed loop of 6+ vertices gets the template
+			// only when it is a real cross-section (>= RAGDOLL_CAP_MIN_RADIUS).
+			// The cut also crosses thin accessories (straps, an antenna, a
+			// pouch: loops of 9-16 vertices at 0.2-1.4 UU), where the template,
+			// scaled by max(R, 1) UU, would bulge out past the tube; those get
+			// the flat centroid fan.
+			FLOAT MeanR = 0.0f;
+			{
+				FVector Cl( 0, 0, 0 );
+				for( INT i=0; i<Ln; i++ )
+					Cl += S.BindPos( Lp[i] );
+				Cl /= (FLOAT)Ln;
+				for( INT i=0; i<Ln; i++ )
+					MeanR += FDist( S.BindPos( Lp[i] ), Cl );
+				MeanR /= (FLOAT)Ln;
+			}
+			if( LoopClosed( l ) && Ln >= 6 && MeanR >= RAGDOLL_CAP_MIN_RADIUS )
+			{
+				NumCaps += BuildTemplateCap( S, Mesh, Lp, Ln, Nout, Bone, CapMat, Variant, StubScale );
+				NumModelled++;
+				continue;
+			}
+			// Small ring / open chain: its own centroid fan.
+			FVector C( 0, 0, 0 );
+			for( INT i=0; i<Ln; i++ )
+				C += S.BindPos( Lp[i] );
+			C /= (FLOAT)Ln;
+			const INT ApexV = AddBoundVertex( S, Mesh, C, Bone );
+			const INT Segs = LoopClosed( l ) ? Ln : Ln - 1;
+			for( INT i=0; i<Segs; i++ )
+			{
+				INT fi = Mesh->Faces.Add();
+				FMeshFace& CF = Mesh->Faces( fi );
+				CF.MaterialIndex = (_WORD)CapMat;
+				CF.iWedge[0] = (_WORD)AddWedge( Mesh, Lp[i],              8, 100 );
+				CF.iWedge[1] = (_WORD)AddWedge( Mesh, Lp[( i + 1 ) % Ln], 248, 100 );
+				CF.iWedge[2] = (_WORD)AddWedge( Mesh, ApexV,            128,  20 );
+				NumCaps++;
+			}
+		}
 	}
 
 	RefreshMeshTables( Mesh, S.BindPos.Num() );
 	S.NumSplits++;
-	debugf( TEXT("RagdollPkg: SplitIslands #%i planarcuts=%i moved=%i seam=%i planar=%i fallback=%i caps=%i verts %i->%i faces %i->%i wedges %i->%i"),
-		S.NumSplits, bPlanar, NumMoved, NumSeam, NumPlanar, NumFallback, NumCaps, NumV0, Mesh->FrameVerts, NumF0, Mesh->Faces.Num(), NumW0, Mesh->Wedges.Num() );
+	debugf( TEXT("RagdollPkg: SplitIslands #%i planarcuts=%i moved=%i seam=%i planar=%i fallback=%i caps=%i modelled=%i verts %i->%i faces %i->%i wedges %i->%i"),
+		S.NumSplits, bPlanar, NumMoved, NumSeam, NumPlanar, NumFallback, NumCaps, NumModelled, NumV0, Mesh->FrameVerts, NumF0, Mesh->Faces.Num(), NumW0, Mesh->Wedges.Num() );
 	unguard;
 }
 
@@ -1048,7 +1624,7 @@ INT RagdollFragmentBody( FRagdollState& S, INT Body, INT K, FLOAT DrawScale )
 		Bd.angularVelocity = PW;
 		Bd.linearDamping   = 0.05f;
 		Bd.angularDamping  = 0.3f;
-		Bd.gravityScale    = 1.0f;
+		Bd.gravityScale    = S.GravityScale;   // zone gravity x GravityScale, as the skeleton bodies
 		Bd.userData        = S.Owner;
 		b3BodyId Id = b3CreateBody( S.World, &Bd );
 		if( B3_IS_NULL( Id ) )
@@ -1233,9 +1809,15 @@ static FWoundStyle WoundStyleFor( const TCHAR* Type, INT Damage )
 		W.Edge     = 0.8f;
 		W.Strength = 0.85f;
 	}
-	else if( !appStricmp( Type, TEXT("exploded") ) || !appStricmp( Type, TEXT("RedeemerDeath") ) )
+	else if( !appStricmp( Type, TEXT("exploded") ) || !appStricmp( Type, TEXT("RedeemerDeath") )
+		|| !appStricmp( Type, TEXT("RocketDeath") ) || !appStricmp( Type, TEXT("FlakDeath") )
+		|| !appStricmp( Type, TEXT("GrenadeDeath") ) || !appStricmp( Type, TEXT("mortared") )
+		|| !appStricmp( Type, TEXT("RipperAltDeath") ) )
 	{
-		// Rocket / flak shell / redeemer: broad scorched blotch.
+		// Rocket ('RocketDeath') / flak shell ('FlakDeath') / grenade /
+		// redeemer: broad scorched blotch. (The retail names were verified
+		// 2026-10-11 from the exported Botpack sources; 'exploded' is only
+		// used by a few mod weapons.)
 		W.Radius   = ClampF( 5.0f + D / 12.0f, 5.0f, 13.0f );
 		W.Color    = FColor( 28, 14, 10 );
 		W.Strength = 0.7f;

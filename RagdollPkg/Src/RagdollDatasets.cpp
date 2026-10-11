@@ -10,6 +10,7 @@
 #include "RagdollPkg.h"
 #include "RagdollInternal.h"
 #include "RagdollDatasets.h"
+#include "RagdollLiveMaps.h"
 
 const FRagdollDatasetEntry* FindRagdollDataset( const TCHAR* LiveMeshName )
 {
@@ -18,6 +19,16 @@ const FRagdollDatasetEntry* FindRagdollDataset( const TCHAR* LiveMeshName )
 	for( INT i=0; i<GRagdollDatasetCount; i++ )
 		if( appStrcmp( GRagdollDatasetTable[i].LiveMeshName, LiveMeshName ) == 0 )
 			return &GRagdollDatasetTable[i];
+	return NULL;
+}
+
+const FRagdollLiveMap* FindRagdollLiveMap( const TCHAR* LiveMeshName )
+{
+	if( !LiveMeshName || !*LiveMeshName )
+		return NULL;
+	for( INT i=0; i<GRagdollLiveMapCount; i++ )
+		if( appStrcmp( GRagdollLiveMapTable[i].LiveMeshName, LiveMeshName ) == 0 )
+			return &GRagdollLiveMapTable[i];
 	return NULL;
 }
 
@@ -53,6 +64,23 @@ UBOOL RagdollBoolProp( UObject* Obj, const TCHAR* Name, UBOOL Default )
 		UBoolProperty* P = *It;
 		if( appStricmp( P->GetName(), Name ) == 0 )
 			return ( *(BITFIELD*)( (BYTE*)Obj + P->Offset ) & P->BitMask ) ? 1 : 0;
+	}
+	return Default;
+	unguard;
+}
+
+// Vector script properties (LastHitLocation / LastHitMomentum, filled by the
+// carcass script before BuildRagdoll) via the struct property list.
+FVector RagdollVectorProp( UObject* Obj, const TCHAR* Name, const FVector& Default )
+{
+	guard(RagdollVectorProp);
+	if( !Obj )
+		return Default;
+	for( TFieldIterator<UStructProperty> It( Obj->GetClass() ); It; ++It )
+	{
+		UStructProperty* P = *It;
+		if( appStricmp( P->GetName(), Name ) == 0 && P->Struct && appStricmp( P->Struct->GetName(), TEXT("Vector") ) == 0 )
+			return *(FVector*)( (BYTE*)Obj + P->Offset );
 	}
 	return Default;
 	unguard;
